@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Pokercraft Date Unlocker",
+  "version": "0.1.0",
+  "description": "Unlocks full date range for Pokercraft session history",
+  "content_scripts": [
+    {
+      "matches": ["https://my.pokercraft.com/*"],
+      "js": ["content.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    }
+  ],
+  "permissions": []
+}
