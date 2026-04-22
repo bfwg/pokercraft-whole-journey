@@ -21,11 +21,11 @@ Three phases deliver a Chrome extension that unlocks Pokercraft's full session h
   2. All `session/list/Holdem` API calls are logged to console with their date range parameters
   3. Requests with date ranges <= 25 days pass through and return correct data unmodified
   4. A manually triggered sub-request with a modified date range returns a valid authenticated response (proving DPoP works)
-**Plans**: TBD
+**Plans:** 2 plans
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md — Extension scaffold with fetch/XHR interception
+- [ ] 01-02-PLAN.md — DPoP token acquisition and proof sub-request
 
 ### Phase 2: Chunking & Response Merging
 **Goal**: Large date ranges are automatically split into 25-day chunks, responses merged, and returned to the app as a single result
