@@ -759,18 +759,48 @@ function installClickInterceptor(popup) {
     }
 
     const parsed = new Date(ariaLabel);
-    if (isNaN(parsed.getTime())) {
-      log(`Click interceptor: failed to parse date "${ariaLabel}"`);
+    if (isNaN(parsed.getTime())) return;
+
+    // Find the cell data object in _weeks and enable it BEFORE Angular's handler runs.
+    // This way Angular's native click handler will process it normally — no delay.
+    const dayOfMonth = parsed.getDate();
+    let enabled = false;
+    if (mv._weeks) {
+      for (const row of mv._weeks) {
+        if (!Array.isArray(row)) continue;
+        for (const cell of row) {
+          if (cell && cell.value === dayOfMonth && !cell.enabled) {
+            cell.enabled = true;
+            enabled = true;
+          }
+        }
+      }
+    }
+    // Also enable in _matCalendarBody.rows if present
+    if (mv._matCalendarBody?.rows) {
+      for (const row of mv._matCalendarBody.rows) {
+        if (!Array.isArray(row)) continue;
+        for (const cell of row) {
+          if (cell && cell.value === dayOfMonth && !cell.enabled) {
+            cell.enabled = true;
+          }
+        }
+      }
+    }
+
+    if (enabled) {
+      log(`Click interceptor: enabled cell for day ${dayOfMonth}, letting Angular handle click`);
+      // Don't stop propagation — let Angular's handler process the click natively
       return;
     }
+
+    // Fallback: if we couldn't find the cell data, use the selection model directly
+    log(`Click interceptor: fallback — forcing selection for ${parsed.toISOString().slice(0, 10)}`);
 
     const date = mv._dateAdapter.createDate(
       parsed.getFullYear(), parsed.getMonth(), parsed.getDate()
     );
 
-    log(`Click interceptor: selecting ${parsed.toISOString().slice(0, 10)}`);
-
-    // For date range pickers, we need to go through the selection model
     const allEls = [popup, ...popup.querySelectorAll('*')];
     for (const el of allEls) {
       for (const comp of getComponentsFromContext(el)) {
@@ -779,19 +809,15 @@ function installClickInterceptor(popup) {
           const strategy = comp._rangeSelectionStrategy;
 
           if (strategy && typeof strategy.selectionFinished === 'function') {
-            // Use the range selection strategy to determine new selection
             const newSelection = strategy.selectionFinished(date, model.selection, e);
             if (newSelection) {
-              log(`  Range strategy returned: start=${newSelection.start}, end=${newSelection.end}`);
               model.updateSelection(newSelection, comp);
               return;
             }
           }
 
-          // Fallback: direct model update
           if (typeof model.add === 'function') {
             model.add(date);
-            log('  Used model.add()');
             return;
           }
           break;
@@ -799,7 +825,6 @@ function installClickInterceptor(popup) {
       }
     }
 
-    // Last fallback: emit on monthView
     mv.selectedChange.emit(date);
   }, true); // capture phase
 
