@@ -311,7 +311,7 @@ async function debugFetchChunk() {
 // --- Helpers ---
 
 function log(...args) {
-  console.log('[Pokercraft Unlocker]', ...args);
+  console.log('[PokerCraft Whole Journey]', ...args);
 }
 
 function isTargetRequest(url) {

@@ -1,8 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "Pokercraft Date Unlocker",
+  "name": "PokerCraft Whole Journey",
   "version": "0.1.0",
   "description": "Unlocks full date range for Pokercraft session history",
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "content_scripts": [
     {
       "matches": ["https://my.pokercraft.com/*"],
