@@ -36,10 +36,10 @@ Plans:
   2. All chunk responses are merged into one result with deduplicated sessionIds, correct fromTime/toTime, and remain=0
   3. The app displays all sessions from the full date range as if it were a single response
   4. Progress of chunk fetching is visible (console logs or extension badge)
-**Plans**: TBD
+**Plans:** 1 plan
 
 Plans:
-- [ ] 02-01: TBD
+- [ ] 02-01-PLAN.md — Chunking engine + response merging + XHR/fetch integration
 
 ### Phase 3: Date Picker Unlock
 **Goal**: Users can select arbitrary date ranges in the Pokercraft date picker, not just the last 3 months
