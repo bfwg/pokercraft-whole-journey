@@ -7,7 +7,7 @@ Three phases deliver a Chrome extension that unlocks Pokercraft's full session h
 ## Phases
 
 - [x] **Phase 1: Extension Scaffold & Request Interception** - MV3 extension that intercepts API calls with valid DPoP tokens (completed 2026-04-22)
-- [ ] **Phase 2: Chunking & Response Merging** - Split large date ranges into 25-day chunks and merge results transparently
+- [x] **Phase 2: Chunking & Response Merging** - Split large date ranges into 25-day chunks and merge results transparently (completed 2026-04-22)
 - [ ] **Phase 3: Date Picker Unlock** - Remove 3-month restriction from the Pokercraft date picker UI
 
 ## Phase Details
@@ -36,7 +36,7 @@ Plans:
   2. All chunk responses are merged into one result with deduplicated sessionIds, correct fromTime/toTime, and remain=0
   3. The app displays all sessions from the full date range as if it were a single response
   4. Progress of chunk fetching is visible (console logs or extension badge)
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
 - [ ] 02-01-PLAN.md — Chunking engine + response merging + XHR/fetch integration
@@ -60,5 +60,5 @@ Plans:
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Extension Scaffold & Request Interception | 2/2 | Complete   | 2026-04-22 |
-| 2. Chunking & Response Merging | 0/? | Not started | - |
+| 2. Chunking & Response Merging | 1/1 | Complete   | 2026-04-22 |
 | 3. Date Picker Unlock | 0/? | Not started | - |
