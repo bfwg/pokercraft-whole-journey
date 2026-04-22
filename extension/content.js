@@ -586,34 +586,89 @@ function findCalendar(popup) {
  * 3. Install click interceptor that reads aria-label date and forces selection via Angular
  */
 function unlockCalendar(popup) {
+  const today = new Date();
+  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+
   // --- Nav buttons ---
-  // Remove disabled so they look clickable, but Angular's handler will still
-  // check min/max internally. Our click interceptor handles the actual navigation.
   const nextBtn = popup.querySelector('button.mat-calendar-next-button');
   const prevBtn = popup.querySelector('button.mat-calendar-previous-button');
 
-  for (const btn of [nextBtn, prevBtn]) {
-    if (!btn) continue;
-    if (btn.disabled || btn.classList.contains('mat-button-disabled')) {
-      btn.disabled = false;
-      btn.classList.remove('mat-button-disabled');
-      btn.removeAttribute('aria-disabled');
-      btn._wasDisabled = true;
-      log(`Unlocked nav button: ${btn.getAttribute('aria-label')}`);
+  // Previous button: always unlock
+  if (prevBtn && (prevBtn.disabled || prevBtn.classList.contains('mat-button-disabled'))) {
+    prevBtn.disabled = false;
+    prevBtn.classList.remove('mat-button-disabled');
+    prevBtn.removeAttribute('aria-disabled');
+    log(`Unlocked nav button: ${prevBtn.getAttribute('aria-label')}`);
+  }
+
+  // Next button: unlock unless navigating would go to a future month
+  if (nextBtn) {
+    const cal = findCalendar(popup);
+    let shouldDisableNext = false;
+    if (cal) {
+      const adapter = cal.monthView?._dateAdapter || cal._dateAdapter;
+      const active = cal._clampedActiveDate || cal.activeDate;
+      if (adapter && active) {
+        const displayedYear = adapter.getYear(active);
+        const displayedMonth = adapter.getMonth(active);
+        // If next month would be after current month, disable
+        if (displayedYear > today.getFullYear() ||
+            (displayedYear === today.getFullYear() && displayedMonth >= today.getMonth())) {
+          shouldDisableNext = true;
+        }
+      }
+    }
+
+    if (shouldDisableNext) {
+      nextBtn.disabled = true;
+      nextBtn.classList.add('mat-button-disabled');
+    } else if (nextBtn.disabled || nextBtn.classList.contains('mat-button-disabled')) {
+      nextBtn.disabled = false;
+      nextBtn.classList.remove('mat-button-disabled');
+      nextBtn.removeAttribute('aria-disabled');
+      log(`Unlocked nav button: ${nextBtn.getAttribute('aria-label')}`);
     }
   }
 
   // --- Date cells ---
   const disabledCells = popup.querySelectorAll('button.mat-calendar-body-cell.mat-calendar-body-disabled');
-  let count = 0;
+  let unlockCount = 0;
   for (const cell of disabledCells) {
-    cell.classList.remove('mat-calendar-body-disabled');
-    cell.removeAttribute('aria-disabled');
-    cell._wasDisabled = true;
-    count++;
+    const ariaLabel = cell.getAttribute('aria-label');
+    if (!ariaLabel) continue;
+    const cellDate = new Date(ariaLabel);
+    if (isNaN(cellDate.getTime())) continue;
+
+    // Only unlock past/today dates
+    if (cellDate <= todayMidnight) {
+      cell.classList.remove('mat-calendar-body-disabled');
+      cell.removeAttribute('aria-disabled');
+      cell._wasDisabled = true;
+      unlockCount++;
+    }
   }
-  if (count > 0) {
-    log(`Unlocked ${count} disabled date cells`);
+  if (unlockCount > 0) {
+    log(`Unlocked ${unlockCount} past date cells`);
+  }
+
+  // Disable any future date cells that Angular left enabled
+  // (can happen after we clear _maxDate during navigation)
+  const enabledCells = popup.querySelectorAll('button.mat-calendar-body-cell:not(.mat-calendar-body-disabled)');
+  let disableCount = 0;
+  for (const cell of enabledCells) {
+    const ariaLabel = cell.getAttribute('aria-label');
+    if (!ariaLabel) continue;
+    const cellDate = new Date(ariaLabel);
+    if (isNaN(cellDate.getTime())) continue;
+
+    if (cellDate > todayMidnight) {
+      cell.classList.add('mat-calendar-body-disabled');
+      cell.setAttribute('aria-disabled', 'true');
+      disableCount++;
+    }
+  }
+  if (disableCount > 0) {
+    log(`Disabled ${disableCount} future date cells`);
   }
 
   // --- Click interceptor ---
@@ -651,6 +706,18 @@ function installClickInterceptor(popup) {
       const newActive = isPrev
         ? adapter.addCalendarMonths(currentActive, -1)
         : adapter.addCalendarMonths(currentActive, 1);
+
+      // Block forward navigation into future months
+      if (!isPrev) {
+        const newYear = adapter.getYear(newActive);
+        const newMonth = adapter.getMonth(newActive);
+        const now = new Date();
+        if (newYear > now.getFullYear() ||
+            (newYear === now.getFullYear() && newMonth > now.getMonth())) {
+          log('Nav interceptor: blocked — cannot navigate to future month');
+          return;
+        }
+      }
 
       // Clear min/max so the activeDate setter doesn't clamp
       cal._minDate = null;
