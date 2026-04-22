@@ -516,81 +516,277 @@ XMLHttpRequest.prototype.send = function (body) {
 
 // --- Date Picker Unlock ---
 
-function unlockDateCells(container) {
-  // Find disabled cells within calendar-related containers
-  const selectors = [
-    '[aria-disabled="true"]',
-    '[disabled]',
-    '.mat-calendar-body-disabled',
-  ];
-  const cells = container.querySelectorAll(selectors.join(','));
+/**
+ * DOM structure (from diagnostics):
+ *   div.cdk-overlay-pane.mat-datepicker-popup
+ *     mat-datepicker-content
+ *       mat-calendar
+ *         mat-calendar-header
+ *           button.mat-calendar-previous-button (prev month)
+ *           button.mat-calendar-next-button (next month, disabled="true" + mat-button-disabled)
+ *         mat-month-view
+ *           table > tbody > tr > td.mat-calendar-body-cell-container
+ *             > button.mat-calendar-body-cell (aria-label="2026-04-23T00:00:00-07:00")
+ *               Disabled cells: + class mat-calendar-body-disabled + aria-disabled="true"
+ *               (NO html disabled attr on cells — only on nav buttons)
+ *
+ * Angular component hierarchy (from __ngContext__):
+ *   MatDatepickerContent { _calendar, datepicker }
+ *     _calendar (MatCalendar) { monthView, _minDate, _maxDate, dateFilter, _currentView }
+ *       monthView (MatMonthView) { _weeks, _matCalendarBody, _dateAdapter, activeDate,
+ *                                   selectedChange, _userSelection, _minDate, _maxDate, dateFilter }
+ */
+
+function getComponentsFromContext(el) {
+  const ctx = el.__ngContext__;
+  if (!ctx || !Array.isArray(ctx)) return [];
+  const results = [];
+  for (const item of ctx) {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      results.push(item);
+    }
+  }
+  return results;
+}
+
+/**
+ * Find the MatMonthView component instance from the calendar popup.
+ */
+function findMonthView(popup) {
+  const allEls = [popup, ...popup.querySelectorAll('*')];
+  for (const el of allEls) {
+    for (const comp of getComponentsFromContext(el)) {
+      if ('_weeks' in comp && 'selectedChange' in comp && '_dateAdapter' in comp) {
+        return comp;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Find the MatCalendar component instance from the calendar popup.
+ */
+function findCalendar(popup) {
+  const allEls = [popup, ...popup.querySelectorAll('*')];
+  for (const el of allEls) {
+    for (const comp of getComponentsFromContext(el)) {
+      if ('monthView' in comp && '_currentView' in comp && '_minDate' in comp) {
+        return comp;
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Unlock the calendar:
+ * 1. Remove disabled state from nav buttons (prev/next month) — these have real HTML disabled
+ * 2. Remove disabled styling from date cells — these use aria-disabled + CSS class
+ * 3. Install click interceptor that reads aria-label date and forces selection via Angular
+ */
+function unlockCalendar(popup) {
+  // --- Nav buttons ---
+  // Remove disabled so they look clickable, but Angular's handler will still
+  // check min/max internally. Our click interceptor handles the actual navigation.
+  const nextBtn = popup.querySelector('button.mat-calendar-next-button');
+  const prevBtn = popup.querySelector('button.mat-calendar-previous-button');
+
+  for (const btn of [nextBtn, prevBtn]) {
+    if (!btn) continue;
+    if (btn.disabled || btn.classList.contains('mat-button-disabled')) {
+      btn.disabled = false;
+      btn.classList.remove('mat-button-disabled');
+      btn.removeAttribute('aria-disabled');
+      btn._wasDisabled = true;
+      log(`Unlocked nav button: ${btn.getAttribute('aria-label')}`);
+    }
+  }
+
+  // --- Date cells ---
+  const disabledCells = popup.querySelectorAll('button.mat-calendar-body-cell.mat-calendar-body-disabled');
   let count = 0;
-  for (const cell of cells) {
+  for (const cell of disabledCells) {
+    cell.classList.remove('mat-calendar-body-disabled');
     cell.removeAttribute('aria-disabled');
-    cell.removeAttribute('disabled');
-    // Remove any class containing 'disabled'
-    const disabledClasses = [...cell.classList].filter(c => c.includes('disabled'));
-    for (const cls of disabledClasses) {
-      cell.classList.remove(cls);
-    }
-    // Remove pointer-events restriction
-    if (cell.style.pointerEvents === 'none') {
-      cell.style.pointerEvents = '';
-    }
+    cell._wasDisabled = true;
     count++;
   }
   if (count > 0) {
-    log(`Unlocked ${count} date cells`);
+    log(`Unlocked ${count} disabled date cells`);
   }
+
+  // --- Click interceptor ---
+  installClickInterceptor(popup);
+}
+
+function installClickInterceptor(popup) {
+  if (popup._dateClickInterceptor) return;
+  popup._dateClickInterceptor = true;
+
+  popup.addEventListener('click', (e) => {
+    // --- Handle nav button clicks ---
+    // Always intercept ALL nav button clicks because Angular's internal handler
+    // checks min/max and will either crash or refuse to navigate.
+    // After selecting a start date, Angular re-creates buttons with new restrictions.
+    const navBtn = e.target.closest('button.mat-calendar-previous-button, button.mat-calendar-next-button');
+    if (navBtn) {
+      // Stop Angular's handler from running
+      e.stopImmediatePropagation();
+      e.preventDefault();
+
+      const cal = findCalendar(popup);
+      if (!cal) {
+        log('Nav interceptor: could not find Calendar component');
+        return;
+      }
+
+      const isPrev = navBtn.classList.contains('mat-calendar-previous-button');
+      const adapter = cal.monthView?._dateAdapter || cal._dateAdapter;
+      if (!adapter) return;
+
+      const currentActive = cal._clampedActiveDate || cal.activeDate;
+      if (!currentActive) return;
+
+      const newActive = isPrev
+        ? adapter.addCalendarMonths(currentActive, -1)
+        : adapter.addCalendarMonths(currentActive, 1);
+
+      // Clear min/max so the activeDate setter doesn't clamp
+      cal._minDate = null;
+      cal._maxDate = null;
+      if (cal.monthView) {
+        cal.monthView._minDate = null;
+        cal.monthView._maxDate = null;
+      }
+
+      if ('_clampedActiveDate' in cal) {
+        cal._clampedActiveDate = newActive;
+      }
+      cal.activeDate = newActive;
+
+      if (cal._changeDetectorRef?.detectChanges) {
+        try { cal._changeDetectorRef.detectChanges(); } catch(err) {
+          log(`Nav detectChanges error: ${err.message}`);
+        }
+      }
+
+      log(`Nav interceptor: moved to ${isPrev ? 'previous' : 'next'} month`);
+
+      // Re-unlock after Angular re-renders the new month
+      setTimeout(() => unlockCalendar(popup), 200);
+      return;
+    }
+
+    // --- Handle date cell clicks on cells we unlocked ---
+    const cellBtn = e.target.closest('button.mat-calendar-body-cell');
+    if (!cellBtn || !cellBtn._wasDisabled) return;
+
+    const ariaLabel = cellBtn.getAttribute('aria-label');
+    if (!ariaLabel) return;
+
+    const mv = findMonthView(popup);
+    if (!mv) {
+      log('Click interceptor: could not find MonthView component');
+      return;
+    }
+
+    const parsed = new Date(ariaLabel);
+    if (isNaN(parsed.getTime())) {
+      log(`Click interceptor: failed to parse date "${ariaLabel}"`);
+      return;
+    }
+
+    const date = mv._dateAdapter.createDate(
+      parsed.getFullYear(), parsed.getMonth(), parsed.getDate()
+    );
+
+    log(`Click interceptor: selecting ${parsed.toISOString().slice(0, 10)}`);
+
+    // For date range pickers, we need to go through the selection model
+    const allEls = [popup, ...popup.querySelectorAll('*')];
+    for (const el of allEls) {
+      for (const comp of getComponentsFromContext(el)) {
+        if ('_model' in comp && '_calendar' in comp && '_rangeSelectionStrategy' in comp) {
+          const model = comp._model;
+          const strategy = comp._rangeSelectionStrategy;
+
+          if (strategy && typeof strategy.selectionFinished === 'function') {
+            // Use the range selection strategy to determine new selection
+            const newSelection = strategy.selectionFinished(date, model.selection, e);
+            if (newSelection) {
+              log(`  Range strategy returned: start=${newSelection.start}, end=${newSelection.end}`);
+              model.updateSelection(newSelection, comp);
+              return;
+            }
+          }
+
+          // Fallback: direct model update
+          if (typeof model.add === 'function') {
+            model.add(date);
+            log('  Used model.add()');
+            return;
+          }
+          break;
+        }
+      }
+    }
+
+    // Last fallback: emit on monthView
+    mv.selectedChange.emit(date);
+  }, true); // capture phase
+
+  log('Click interceptor installed');
 }
 
 function patchDatePicker() {
   let calendarObserver = null;
+  let debounceTimer = null;
 
   const bodyObserver = new MutationObserver((mutations) => {
     for (const mutation of mutations) {
       for (const node of mutation.addedNodes) {
         if (!(node instanceof HTMLElement)) continue;
 
-        // Check if the added node is or contains a calendar element
-        const calendarEl =
-          node.matches?.('mat-calendar, .mat-calendar, mat-datepicker-content, .mat-datepicker-content, .cdk-overlay-container, [class*="calendar"]')
+        // The popup is: div.cdk-overlay-pane.mat-datepicker-popup
+        const popup =
+          node.matches?.('.mat-datepicker-popup')
             ? node
-            : node.querySelector?.('mat-calendar, .mat-calendar, mat-datepicker-content, .mat-datepicker-content, [class*="calendar"]');
+            : node.querySelector?.('.mat-datepicker-popup') ||
+              node.querySelector?.('mat-datepicker-content');
 
-        if (calendarEl) {
-          log('Calendar popup detected — unlocking date cells');
-          unlockDateCells(calendarEl);
+        if (popup) {
+          log('Calendar popup detected');
 
-          // Disconnect previous calendar observer if any
-          if (calendarObserver) {
-            calendarObserver.disconnect();
-          }
+          // Wait for Angular to finish rendering
+          setTimeout(() => unlockCalendar(popup), 150);
 
-          // Watch for month navigation re-renders within the calendar
+          // Watch for month navigation re-renders (childList only)
+          if (calendarObserver) calendarObserver.disconnect();
           calendarObserver = new MutationObserver(() => {
-            unlockDateCells(calendarEl);
+            if (debounceTimer) clearTimeout(debounceTimer);
+            debounceTimer = setTimeout(() => {
+              // Disconnect during patching to avoid loops
+              if (calendarObserver) {
+                calendarObserver.disconnect();
+              }
+              unlockCalendar(popup);
+              if (calendarObserver) {
+                calendarObserver.observe(popup, { childList: true, subtree: true });
+              }
+            }, 150);
           });
-          calendarObserver.observe(calendarEl, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['aria-disabled', 'class', 'disabled'],
-          });
+          calendarObserver.observe(popup, { childList: true, subtree: true });
         }
       }
 
-      // Clean up calendar observer when overlay is removed
       for (const node of mutation.removedNodes) {
         if (!(node instanceof HTMLElement)) continue;
-        if (
-          node.matches?.('mat-datepicker-content, .mat-datepicker-content, .cdk-overlay-container') ||
-          node.querySelector?.('mat-calendar')
-        ) {
+        if (node.matches?.('.mat-datepicker-popup') || node.querySelector?.('.mat-datepicker-popup')) {
           if (calendarObserver) {
             calendarObserver.disconnect();
             calendarObserver = null;
-            log('Calendar removed — secondary observer disconnected');
+            log('Calendar removed — observer disconnected');
           }
         }
       }
@@ -603,7 +799,6 @@ function patchDatePicker() {
 
 // --- Init ---
 
-// Date picker unlock needs document.body — wait for it if not ready yet
 if (document.body) {
   patchDatePicker();
 } else {
