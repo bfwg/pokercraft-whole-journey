@@ -25,8 +25,8 @@
 
 ### DPoP Token Handling
 
-- [ ] **DPOP-01**: Extension hooks into app's DPoP token generator to obtain valid per-request tokens for sub-requests
-- [ ] **DPOP-02**: Fallback: if hook fails, extension extracts CryptoKey and signs DPoP tokens manually (ES256)
+- [x] **DPOP-01**: Extension hooks into app's DPoP token generator to obtain valid per-request tokens for sub-requests
+- [x] **DPOP-02**: Fallback: if hook fails, extension extracts CryptoKey and signs DPoP tokens manually (ES256)
 
 ### Response Merging
 
@@ -72,8 +72,8 @@
 | INT-01 | Phase 1 | Complete |
 | INT-02 | Phase 1 | Complete |
 | INT-03 | Phase 1 | Complete |
-| DPOP-01 | Phase 1 | Pending |
-| DPOP-02 | Phase 1 | Pending |
+| DPOP-01 | Phase 1 | Complete |
+| DPOP-02 | Phase 1 | Complete |
 | SPL-01 | Phase 2 | Pending |
 | SPL-02 | Phase 2 | Pending |
 | SPL-03 | Phase 2 | Pending |

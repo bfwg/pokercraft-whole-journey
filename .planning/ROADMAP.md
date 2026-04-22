@@ -6,7 +6,7 @@ Three phases deliver a Chrome extension that unlocks Pokercraft's full session h
 
 ## Phases
 
-- [ ] **Phase 1: Extension Scaffold & Request Interception** - MV3 extension that intercepts API calls with valid DPoP tokens
+- [x] **Phase 1: Extension Scaffold & Request Interception** - MV3 extension that intercepts API calls with valid DPoP tokens (completed 2026-04-22)
 - [ ] **Phase 2: Chunking & Response Merging** - Split large date ranges into 25-day chunks and merge results transparently
 - [ ] **Phase 3: Date Picker Unlock** - Remove 3-month restriction from the Pokercraft date picker UI
 
@@ -21,7 +21,7 @@ Three phases deliver a Chrome extension that unlocks Pokercraft's full session h
   2. All `session/list/Holdem` API calls are logged to console with their date range parameters
   3. Requests with date ranges <= 25 days pass through and return correct data unmodified
   4. A manually triggered sub-request with a modified date range returns a valid authenticated response (proving DPoP works)
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 Plans:
 - [ ] 01-01-PLAN.md — Extension scaffold with fetch/XHR interception
@@ -59,6 +59,6 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Extension Scaffold & Request Interception | 1/2 | In Progress|  |
+| 1. Extension Scaffold & Request Interception | 2/2 | Complete   | 2026-04-22 |
 | 2. Chunking & Response Merging | 0/? | Not started | - |
 | 3. Date Picker Unlock | 0/? | Not started | - |
