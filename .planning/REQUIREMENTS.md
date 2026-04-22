@@ -66,28 +66,28 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EXT-01 | — | Pending |
-| EXT-02 | — | Pending |
-| EXT-03 | — | Pending |
-| INT-01 | — | Pending |
-| INT-02 | — | Pending |
-| INT-03 | — | Pending |
-| SPL-01 | — | Pending |
-| SPL-02 | — | Pending |
-| SPL-03 | — | Pending |
-| DPOP-01 | — | Pending |
-| DPOP-02 | — | Pending |
-| MRG-01 | — | Pending |
-| MRG-02 | — | Pending |
-| MRG-03 | — | Pending |
-| MRG-04 | — | Pending |
-| DPK-01 | — | Pending |
-| DPK-02 | — | Pending |
+| EXT-01 | Phase 1 | Pending |
+| EXT-02 | Phase 1 | Pending |
+| EXT-03 | Phase 1 | Pending |
+| INT-01 | Phase 1 | Pending |
+| INT-02 | Phase 1 | Pending |
+| INT-03 | Phase 1 | Pending |
+| DPOP-01 | Phase 1 | Pending |
+| DPOP-02 | Phase 1 | Pending |
+| SPL-01 | Phase 2 | Pending |
+| SPL-02 | Phase 2 | Pending |
+| SPL-03 | Phase 2 | Pending |
+| MRG-01 | Phase 2 | Pending |
+| MRG-02 | Phase 2 | Pending |
+| MRG-03 | Phase 2 | Pending |
+| MRG-04 | Phase 2 | Pending |
+| DPK-01 | Phase 3 | Pending |
+| DPK-02 | Phase 3 | Pending |
 
 **Coverage:**
 - v1 requirements: 17 total
-- Mapped to phases: 0
-- Unmapped: 17 (pending roadmap creation)
+- Mapped to phases: 17
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-04-22*
