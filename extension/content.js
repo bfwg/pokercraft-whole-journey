@@ -130,9 +130,71 @@ async function makeProofRequest() {
   }
 }
 
+// --- AES-CBC Decryption (mirrors decode.js) ---
+
+// node-forge uses first 16 bytes of the 32-char IV string; Web Crypto requires exactly 16
+const DECRYPT_IV = 'tE5_yR0~uI2-oP4a';
+
+function hexToBytes(hex) {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substring(i, i + 2), 16);
+  }
+  return bytes;
+}
+
+async function decryptResponse(headerA, hexData) {
+  // Extract AES key: strip first 8 and last 8 chars from header 'a'
+  const keyStr = headerA.substring(8, headerA.length - 8);
+  const keyBytes = new TextEncoder().encode(keyStr);
+  const ivBytes = new TextEncoder().encode(DECRYPT_IV);
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw', keyBytes, { name: 'AES-CBC' }, false, ['decrypt']
+  );
+
+  const encrypted = hexToBytes(hexData);
+  const decrypted = await crypto.subtle.decrypt(
+    { name: 'AES-CBC', iv: ivBytes }, cryptoKey, encrypted
+  );
+
+  // Remove PKCS7 padding and parse JSON
+  const text = new TextDecoder().decode(decrypted);
+  // Trim any trailing padding/null bytes
+  const trimmed = text.replace(/[\x00-\x1f]+$/, '');
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return trimmed;
+  }
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function encryptData(keyStr, plaintext) {
+  const keyBytes = new TextEncoder().encode(keyStr);
+  const ivBytes = new TextEncoder().encode(DECRYPT_IV);
+
+  const cryptoKey = await crypto.subtle.importKey(
+    'raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']
+  );
+
+  const data = new TextEncoder().encode(plaintext);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: 'AES-CBC', iv: ivBytes }, cryptoKey, data
+  );
+
+  return bytesToHex(new Uint8Array(encrypted));
+}
+
+// Store the last seen header 'a' so we can re-encrypt merged data
+let lastHeaderA = null;
+
 // --- Chunking Engine ---
 
-function splitDateRange(fromMs, toMs, chunkDays = 25) {
+function splitDateRange(fromMs, toMs, chunkDays = 85) {
   const chunkMs = chunkDays * 24 * 60 * 60 * 1000;
   const chunks = [];
   let cursor = fromMs;
@@ -167,10 +229,24 @@ async function fetchChunks(baseUrl, chunks) {
         continue;
       }
 
-      const data = await response.json();
+      // Response is encrypted: { data: "<hex>" } with key in header 'a'
+      const headerA = response.headers.get('a');
+      if (headerA) lastHeaderA = headerA;
+      const envelope = await response.json();
+
+      let data;
+      if (headerA && envelope.data && typeof envelope.data === 'string') {
+        // Encrypted response — decrypt it
+        data = await decryptResponse(headerA, envelope.data);
+        log(`Chunk ${i + 1}/${chunks.length}: decrypted OK`);
+      } else {
+        // Unencrypted or unexpected format — use as-is
+        data = envelope;
+      }
+
       const fromDate = new Date(chunk.from).toISOString().slice(0, 10);
       const toDate = new Date(chunk.to).toISOString().slice(0, 10);
-      log(`Chunk ${i + 1}/${chunks.length}: ${fromDate} → ${toDate} — ${data.sessionIds?.length || 0} sessions`);
+      log(`Chunk ${i + 1}/${chunks.length}: ${fromDate} → ${toDate} — ${data.vm?.length || data.sessionIds?.length || 0} sessions`);
       results.push(data);
     } catch (err) {
       log(`Chunk ${i + 1}/${chunks.length}: Error — ${err.message}`);
@@ -184,27 +260,53 @@ async function fetchChunks(baseUrl, chunks) {
 }
 
 function mergeResponses(responses, originalFromMs, originalToMs) {
-  if (responses.length === 0) return { sessionIds: [], fromTime: originalFromMs, toTime: originalToMs, remain: 0 };
+  if (responses.length === 0) return { vm: [] };
 
-  const allIds = new Set();
+  // Deduplicate sessions by sessionId
+  const sessionMap = new Map();
   for (const r of responses) {
-    if (r.sessionIds) {
-      for (const id of r.sessionIds) allIds.add(id);
+    const sessions = r.vm || r.sessionIds || [];
+    if (Array.isArray(sessions)) {
+      for (const s of sessions) {
+        const id = typeof s === 'object' ? s.sessionId : s;
+        if (id && !sessionMap.has(id)) {
+          sessionMap.set(id, s);
+        }
+      }
     }
   }
 
-  const merged = { ...responses[0] };
-  merged.sessionIds = [...allIds];
-  merged.fromTime = originalFromMs;
-  merged.toTime = originalToMs;
-  merged.remain = 0;
-
-  log(`Merged: ${merged.sessionIds.length} sessions from ${responses.length} chunks`);
-  return merged;
+  const merged = [...sessionMap.values()];
+  log(`Merged: ${merged.length} sessions from ${responses.length} chunks`);
+  return { vm: merged };
 }
 
 // Expose for manual testing in DevTools console
-window.__pokercraftUnlocker = { makeProofRequest, dpopSigner, log, splitDateRange, mergeResponses };
+window.__pokercraftUnlocker = { makeProofRequest, dpopSigner, log, splitDateRange, mergeResponses, debugFetchChunk };
+
+async function debugFetchChunk() {
+  if (!capturedAuth?.authorization) { log('No auth yet'); return; }
+  const to = Date.now();
+  const from = to - 7 * 24 * 60 * 60 * 1000;
+  const url = `https://my.pokercraft.com/api/session/list/Holdem?from=${from}&to=${to}&currency=USD`;
+  const dpopToken = await dpopSigner.generateDPoP('GET', url);
+  const response = await originalFetch(url, {
+    headers: { authorization: capturedAuth.authorization, dpop: dpopToken },
+  });
+  const headerA = response.headers.get('a');
+  const envelope = await response.json();
+  log('Raw envelope keys:', Object.keys(envelope));
+  log('Header a present:', !!headerA);
+  if (headerA && envelope.data) {
+    const decrypted = await decryptResponse(headerA, envelope.data);
+    log('Decrypted type:', typeof decrypted);
+    log('Decrypted keys:', typeof decrypted === 'object' ? Object.keys(decrypted) : 'N/A');
+    log('Decrypted preview:', JSON.stringify(decrypted).substring(0, 500));
+    return decrypted;
+  }
+  log('No encryption detected, raw:', JSON.stringify(envelope).substring(0, 500));
+  return envelope;
+}
 
 // --- Helpers ---
 
@@ -235,7 +337,7 @@ function parseDateRange(url) {
 }
 
 function isLargeRange(days) {
-  return days > 25;
+  return days > 85;
 }
 
 // --- Fetch interception ---
@@ -277,6 +379,16 @@ window.fetch = async function (input, init) {
       log(`Splitting ${range.days}-day range into ${chunks.length} chunks`);
       const responses = await fetchChunks(url, chunks);
       const merged = mergeResponses(responses, fromMs, toMs);
+
+      // Re-encrypt so the app's decryption layer handles it
+      if (lastHeaderA) {
+        const aesKey = lastHeaderA.substring(8, lastHeaderA.length - 8);
+        const encryptedHex = await encryptData(aesKey, JSON.stringify(merged));
+        return new Response(JSON.stringify({ data: encryptedHex }), {
+          status: 200,
+          headers: { 'content-type': 'application/json', 'a': lastHeaderA },
+        });
+      }
       return new Response(JSON.stringify(merged), {
         status: 200,
         headers: { 'content-type': 'application/json' },
@@ -335,21 +447,60 @@ XMLHttpRequest.prototype.send = function (body) {
       log(`Splitting ${range.days}-day range into ${chunks.length} chunks`);
 
       const xhr = this;
+      // Save all event listeners/handlers the app may have set
+      const onloadHandler = xhr.onload;
+      const onreadystatechangeHandler = xhr.onreadystatechange;
+      const onloadendHandler = xhr.onloadend;
+
       (async () => {
         try {
           const responses = await fetchChunks(xhr._pcUrl, chunks);
           const merged = mergeResponses(responses, fromMs, toMs);
-          const mergedJson = JSON.stringify(merged);
 
+          // Re-encrypt merged data so the app's decryption layer handles it normally
+          let responseBody;
+          if (lastHeaderA) {
+            const aesKey = lastHeaderA.substring(8, lastHeaderA.length - 8);
+            const encryptedHex = await encryptData(aesKey, JSON.stringify(merged));
+            responseBody = JSON.stringify({ data: encryptedHex });
+          } else {
+            responseBody = JSON.stringify(merged);
+            log('Warning: no encryption key available, returning plaintext');
+          }
+
+          // Override all response-related properties
           Object.defineProperty(xhr, 'readyState', { get: () => 4, configurable: true });
           Object.defineProperty(xhr, 'status', { get: () => 200, configurable: true });
           Object.defineProperty(xhr, 'statusText', { get: () => 'OK', configurable: true });
-          Object.defineProperty(xhr, 'responseText', { get: () => mergedJson, configurable: true });
-          Object.defineProperty(xhr, 'response', { get: () => mergedJson, configurable: true });
+          Object.defineProperty(xhr, 'responseText', { get: () => responseBody, configurable: true });
+          Object.defineProperty(xhr, 'response', { get: () => responseBody, configurable: true });
+          Object.defineProperty(xhr, 'responseURL', { get: () => xhr._pcUrl, configurable: true });
 
+          // Fake the response headers so the app can read header 'a' for decryption
+          xhr.getResponseHeader = function(name) {
+            if (name.toLowerCase() === 'a' && lastHeaderA) return lastHeaderA;
+            if (name.toLowerCase() === 'content-type') return 'application/json';
+            return null;
+          };
+          xhr.getAllResponseHeaders = function() {
+            return `content-type: application/json\r\na: ${lastHeaderA || ''}\r\n`;
+          };
+
+          // Trigger callbacks — Angular/Zone.js uses both property handlers and events
+          if (typeof onreadystatechangeHandler === 'function') {
+            onreadystatechangeHandler.call(xhr);
+          }
           xhr.dispatchEvent(new Event('readystatechange'));
-          xhr.dispatchEvent(new Event('load'));
-          xhr.dispatchEvent(new Event('loadend'));
+
+          if (typeof onloadHandler === 'function') {
+            onloadHandler.call(xhr, new ProgressEvent('load'));
+          }
+          xhr.dispatchEvent(new ProgressEvent('load'));
+
+          if (typeof onloadendHandler === 'function') {
+            onloadendHandler.call(xhr, new ProgressEvent('loadend'));
+          }
+          xhr.dispatchEvent(new ProgressEvent('loadend'));
         } catch (err) {
           log('Chunking failed, falling back to original request:', err.message);
           originalXHRSend.call(xhr, body);
