@@ -130,8 +130,81 @@ async function makeProofRequest() {
   }
 }
 
+// --- Chunking Engine ---
+
+function splitDateRange(fromMs, toMs, chunkDays = 25) {
+  const chunkMs = chunkDays * 24 * 60 * 60 * 1000;
+  const chunks = [];
+  let cursor = fromMs;
+  while (cursor < toMs) {
+    const end = Math.min(cursor + chunkMs, toMs);
+    chunks.push({ from: cursor, to: end });
+    cursor = end;
+  }
+  return chunks;
+}
+
+async function fetchChunks(baseUrl, chunks) {
+  const results = [];
+  for (let i = 0; i < chunks.length; i++) {
+    const chunk = chunks[i];
+    const parsed = new URL(baseUrl, window.location.origin);
+    parsed.searchParams.set('from', String(chunk.from));
+    parsed.searchParams.set('to', String(chunk.to));
+    const chunkUrl = parsed.toString();
+
+    try {
+      const dpopToken = await dpopSigner.generateDPoP('GET', chunkUrl);
+      const response = await originalFetch(chunkUrl, {
+        headers: {
+          authorization: capturedAuth.authorization,
+          dpop: dpopToken,
+        },
+      });
+
+      if (response.status !== 200) {
+        log(`Chunk ${i + 1}/${chunks.length}: HTTP ${response.status} — skipping`);
+        continue;
+      }
+
+      const data = await response.json();
+      const fromDate = new Date(chunk.from).toISOString().slice(0, 10);
+      const toDate = new Date(chunk.to).toISOString().slice(0, 10);
+      log(`Chunk ${i + 1}/${chunks.length}: ${fromDate} → ${toDate} — ${data.sessionIds?.length || 0} sessions`);
+      results.push(data);
+    } catch (err) {
+      log(`Chunk ${i + 1}/${chunks.length}: Error — ${err.message}`);
+    }
+
+    if (i < chunks.length - 1) {
+      await new Promise((r) => setTimeout(r, 300));
+    }
+  }
+  return results;
+}
+
+function mergeResponses(responses, originalFromMs, originalToMs) {
+  if (responses.length === 0) return { sessionIds: [], fromTime: originalFromMs, toTime: originalToMs, remain: 0 };
+
+  const allIds = new Set();
+  for (const r of responses) {
+    if (r.sessionIds) {
+      for (const id of r.sessionIds) allIds.add(id);
+    }
+  }
+
+  const merged = { ...responses[0] };
+  merged.sessionIds = [...allIds];
+  merged.fromTime = originalFromMs;
+  merged.toTime = originalToMs;
+  merged.remain = 0;
+
+  log(`Merged: ${merged.sessionIds.length} sessions from ${responses.length} chunks`);
+  return merged;
+}
+
 // Expose for manual testing in DevTools console
-window.__pokercraftUnlocker = { makeProofRequest, dpopSigner, log };
+window.__pokercraftUnlocker = { makeProofRequest, dpopSigner, log, splitDateRange, mergeResponses };
 
 // --- Helpers ---
 
@@ -196,8 +269,20 @@ window.fetch = async function (input, init) {
       }
     }
 
-    if (isLargeRange(range.days)) {
-      log('Large range detected — will need chunking (Phase 2)');
+    if (isLargeRange(range.days) && capturedAuth) {
+      const parsed = new URL(url, window.location.origin);
+      const fromMs = Number(parsed.searchParams.get('from'));
+      const toMs = Number(parsed.searchParams.get('to'));
+      const chunks = splitDateRange(fromMs, toMs);
+      log(`Splitting ${range.days}-day range into ${chunks.length} chunks`);
+      const responses = await fetchChunks(url, chunks);
+      const merged = mergeResponses(responses, fromMs, toMs);
+      return new Response(JSON.stringify(merged), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    } else if (isLargeRange(range.days)) {
+      log('Large range detected but no auth captured yet — passing through');
     }
   }
   return originalFetch(input, init);
@@ -242,8 +327,37 @@ XMLHttpRequest.prototype.send = function (body) {
       }
     }
 
-    if (isLargeRange(range.days)) {
-      log('Large range detected — will need chunking (Phase 2)');
+    if (isLargeRange(range.days) && capturedAuth) {
+      const parsed = new URL(this._pcUrl, window.location.origin);
+      const fromMs = Number(parsed.searchParams.get('from'));
+      const toMs = Number(parsed.searchParams.get('to'));
+      const chunks = splitDateRange(fromMs, toMs);
+      log(`Splitting ${range.days}-day range into ${chunks.length} chunks`);
+
+      const xhr = this;
+      (async () => {
+        try {
+          const responses = await fetchChunks(xhr._pcUrl, chunks);
+          const merged = mergeResponses(responses, fromMs, toMs);
+          const mergedJson = JSON.stringify(merged);
+
+          Object.defineProperty(xhr, 'readyState', { get: () => 4, configurable: true });
+          Object.defineProperty(xhr, 'status', { get: () => 200, configurable: true });
+          Object.defineProperty(xhr, 'statusText', { get: () => 'OK', configurable: true });
+          Object.defineProperty(xhr, 'responseText', { get: () => mergedJson, configurable: true });
+          Object.defineProperty(xhr, 'response', { get: () => mergedJson, configurable: true });
+
+          xhr.dispatchEvent(new Event('readystatechange'));
+          xhr.dispatchEvent(new Event('load'));
+          xhr.dispatchEvent(new Event('loadend'));
+        } catch (err) {
+          log('Chunking failed, falling back to original request:', err.message);
+          originalXHRSend.call(xhr, body);
+        }
+      })();
+      return; // Don't call originalXHRSend
+    } else if (isLargeRange(range.days)) {
+      log('Large range detected but no auth captured yet — passing through');
     }
   }
   return originalXHRSend.call(this, body);
