@@ -25,8 +25,8 @@ function isTargetRequest(url) {
 
 function parseDateRange(url) {
   const parsed = new URL(url, window.location.origin);
-  const from = new Date(parsed.searchParams.get('from'));
-  const to = new Date(parsed.searchParams.get('to'));
+  const from = new Date(Number(parsed.searchParams.get('from')));
+  const to = new Date(Number(parsed.searchParams.get('to')));
   const days = Math.round((to - from) / (1000 * 60 * 60 * 24));
   return { from, to, days };
 }
