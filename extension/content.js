@@ -282,7 +282,7 @@ function mergeResponses(responses, originalFromMs, originalToMs) {
 }
 
 // Expose for manual testing in DevTools console
-window.__pokercraftUnlocker = { makeProofRequest, dpopSigner, log, splitDateRange, mergeResponses, debugFetchChunk };
+window.__pokercraftUnlocker = { makeProofRequest, dpopSigner, log, splitDateRange, mergeResponses, debugFetchChunk, patchDatePicker };
 
 async function debugFetchChunk() {
   if (!capturedAuth?.authorization) { log('No auth yet'); return; }
@@ -514,6 +514,94 @@ XMLHttpRequest.prototype.send = function (body) {
   return originalXHRSend.call(this, body);
 };
 
+// --- Date Picker Unlock ---
+
+function unlockDateCells(container) {
+  // Find disabled cells within calendar-related containers
+  const selectors = [
+    '[aria-disabled="true"]',
+    '[disabled]',
+    '.mat-calendar-body-disabled',
+  ];
+  const cells = container.querySelectorAll(selectors.join(','));
+  let count = 0;
+  for (const cell of cells) {
+    cell.removeAttribute('aria-disabled');
+    cell.removeAttribute('disabled');
+    // Remove any class containing 'disabled'
+    const disabledClasses = [...cell.classList].filter(c => c.includes('disabled'));
+    for (const cls of disabledClasses) {
+      cell.classList.remove(cls);
+    }
+    // Remove pointer-events restriction
+    if (cell.style.pointerEvents === 'none') {
+      cell.style.pointerEvents = '';
+    }
+    count++;
+  }
+  if (count > 0) {
+    log(`Unlocked ${count} date cells`);
+  }
+}
+
+function patchDatePicker() {
+  let calendarObserver = null;
+
+  const bodyObserver = new MutationObserver((mutations) => {
+    for (const mutation of mutations) {
+      for (const node of mutation.addedNodes) {
+        if (!(node instanceof HTMLElement)) continue;
+
+        // Check if the added node is or contains a calendar element
+        const calendarEl =
+          node.matches?.('mat-calendar, .mat-calendar, mat-datepicker-content, .mat-datepicker-content, .cdk-overlay-container, [class*="calendar"]')
+            ? node
+            : node.querySelector?.('mat-calendar, .mat-calendar, mat-datepicker-content, .mat-datepicker-content, [class*="calendar"]');
+
+        if (calendarEl) {
+          log('Calendar popup detected — unlocking date cells');
+          unlockDateCells(calendarEl);
+
+          // Disconnect previous calendar observer if any
+          if (calendarObserver) {
+            calendarObserver.disconnect();
+          }
+
+          // Watch for month navigation re-renders within the calendar
+          calendarObserver = new MutationObserver(() => {
+            unlockDateCells(calendarEl);
+          });
+          calendarObserver.observe(calendarEl, {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['aria-disabled', 'class', 'disabled'],
+          });
+        }
+      }
+
+      // Clean up calendar observer when overlay is removed
+      for (const node of mutation.removedNodes) {
+        if (!(node instanceof HTMLElement)) continue;
+        if (
+          node.matches?.('mat-datepicker-content, .mat-datepicker-content, .cdk-overlay-container') ||
+          node.querySelector?.('mat-calendar')
+        ) {
+          if (calendarObserver) {
+            calendarObserver.disconnect();
+            calendarObserver = null;
+            log('Calendar removed — secondary observer disconnected');
+          }
+        }
+      }
+    }
+  });
+
+  bodyObserver.observe(document.body, { childList: true, subtree: true });
+  log('Date picker unlock observer active');
+}
+
 // --- Init ---
 
-log('Content script loaded — fetch/XHR interception active, DPoP capture enabled');
+patchDatePicker();
+log('Content script loaded — fetch/XHR interception active, DPoP capture enabled, date picker unlock active');
