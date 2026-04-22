@@ -681,64 +681,55 @@ function installClickInterceptor(popup) {
 
   popup.addEventListener('click', (e) => {
     // --- Handle nav button clicks ---
-    // Always intercept ALL nav button clicks because Angular's internal handler
-    // checks min/max and will either crash or refuse to navigate.
-    // After selecting a start date, Angular re-creates buttons with new restrictions.
     const navBtn = e.target.closest('button.mat-calendar-previous-button, button.mat-calendar-next-button');
     if (navBtn) {
-      // Stop Angular's handler from running
-      e.stopImmediatePropagation();
-      e.preventDefault();
-
-      const cal = findCalendar(popup);
-      if (!cal) {
-        log('Nav interceptor: could not find Calendar component');
-        return;
-      }
-
       const isPrev = navBtn.classList.contains('mat-calendar-previous-button');
-      const adapter = cal.monthView?._dateAdapter || cal._dateAdapter;
-      if (!adapter) return;
-
-      const currentActive = cal._clampedActiveDate || cal.activeDate;
-      if (!currentActive) return;
-
-      const newActive = isPrev
-        ? adapter.addCalendarMonths(currentActive, -1)
-        : adapter.addCalendarMonths(currentActive, 1);
 
       // Block forward navigation into future months
       if (!isPrev) {
-        const newYear = adapter.getYear(newActive);
-        const newMonth = adapter.getMonth(newActive);
-        const now = new Date();
-        if (newYear > now.getFullYear() ||
-            (newYear === now.getFullYear() && newMonth > now.getMonth())) {
-          log('Nav interceptor: blocked — cannot navigate to future month');
-          return;
+        const cal = findCalendar(popup);
+        if (cal) {
+          const adapter = cal.monthView?._dateAdapter || cal._dateAdapter;
+          const currentActive = cal._clampedActiveDate || cal.activeDate;
+          if (adapter && currentActive) {
+            const newActive = adapter.addCalendarMonths(currentActive, 1);
+            const newYear = adapter.getYear(newActive);
+            const newMonth = adapter.getMonth(newActive);
+            const now = new Date();
+            if (newYear > now.getFullYear() ||
+                (newYear === now.getFullYear() && newMonth > now.getMonth())) {
+              log('Nav interceptor: blocked — cannot navigate to future month');
+              e.stopImmediatePropagation();
+              e.preventDefault();
+              return;
+            }
+          }
         }
       }
 
-      // Clear min/max so the activeDate setter doesn't clamp
-      cal._minDate = null;
-      cal._maxDate = null;
-      if (cal.monthView) {
-        cal.monthView._minDate = null;
-        cal.monthView._maxDate = null;
-      }
-
-      if ('_clampedActiveDate' in cal) {
-        cal._clampedActiveDate = newActive;
-      }
-      cal.activeDate = newActive;
-
-      if (cal._changeDetectorRef?.detectChanges) {
-        try { cal._changeDetectorRef.detectChanges(); } catch(err) {
-          log(`Nav detectChanges error: ${err.message}`);
+      // Clear min/max restrictions so Angular's own handler can navigate freely.
+      // We're in capture phase (before Angular's handler), so this takes effect
+      // before Angular checks the restrictions. Angular handles the navigation
+      // inside Zone.js, so change detection works normally.
+      const cal = findCalendar(popup);
+      if (cal) {
+        cal._minDate = null;
+        cal._maxDate = null;
+        if (cal.monthView) {
+          cal.monthView._minDate = null;
+          cal.monthView._maxDate = null;
         }
       }
 
-      log(`Nav interceptor: moved to ${isPrev ? 'previous' : 'next'} month`);
+      // If the button is disabled (HTML attr), Angular's handler won't fire.
+      // Remove disabled so the click reaches Angular's handler.
+      if (navBtn.disabled) {
+        navBtn.disabled = false;
+        navBtn.classList.remove('mat-button-disabled');
+      }
+
+      // DON'T stopPropagation — let Angular handle the navigation inside Zone.js
+      log(`Nav interceptor: cleared restrictions, letting Angular navigate ${isPrev ? 'previous' : 'next'} month`);
 
       // Re-unlock after Angular re-renders the new month
       setTimeout(() => unlockCalendar(popup), 200);
