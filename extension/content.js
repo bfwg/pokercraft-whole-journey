@@ -310,8 +310,10 @@ async function debugFetchChunk() {
 
 // --- Helpers ---
 
+const DEBUG = false; // Set to true to enable console logging
+
 function log(...args) {
-  console.log('[PokerCraft Whole Journey]', ...args);
+  if (DEBUG) console.log('[PokerCraft Whole Journey]', ...args);
 }
 
 function isTargetRequest(url) {
