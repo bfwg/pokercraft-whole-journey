@@ -48,10 +48,10 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. User can select a start date more than 3 months in the past in the date picker
   2. Date picker patching survives page navigation within Pokercraft (MutationObserver re-applies)
-**Plans**: TBD
+**Plans:** 1 plan
 
 Plans:
-- [ ] 03-01: TBD
+- [ ] 03-01-PLAN.md — MutationObserver date picker unlock + human verification
 
 ## Progress
 
