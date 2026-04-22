@@ -603,5 +603,16 @@ function patchDatePicker() {
 
 // --- Init ---
 
-patchDatePicker();
+// Date picker unlock needs document.body — wait for it if not ready yet
+if (document.body) {
+  patchDatePicker();
+} else {
+  const waitForBody = new MutationObserver(() => {
+    if (document.body) {
+      waitForBody.disconnect();
+      patchDatePicker();
+    }
+  });
+  waitForBody.observe(document.documentElement, { childList: true });
+}
 log('Content script loaded — fetch/XHR interception active, DPoP capture enabled, date picker unlock active');
