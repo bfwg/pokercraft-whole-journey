@@ -37,8 +37,8 @@
 
 ### Date Picker Unlock
 
-- [ ] **DPK-01**: 3-month date range restriction is removed from the Pokercraft date picker UI
-- [ ] **DPK-02**: Date picker patching uses DOM-level approach (MutationObserver) for resilience against app updates
+- [x] **DPK-01**: 3-month date range restriction is removed from the Pokercraft date picker UI
+- [x] **DPK-02**: Date picker patching uses DOM-level approach (MutationObserver) for resilience against app updates
 
 ## v2 Requirements
 
@@ -81,8 +81,8 @@
 | MRG-02 | Phase 2 | Complete |
 | MRG-03 | Phase 2 | Complete |
 | MRG-04 | Phase 2 | Complete |
-| DPK-01 | Phase 3 | Pending |
-| DPK-02 | Phase 3 | Pending |
+| DPK-01 | Phase 3 | Complete |
+| DPK-02 | Phase 3 | Complete |
 
 **Coverage:**
 - v1 requirements: 17 total

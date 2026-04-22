@@ -8,7 +8,7 @@ Three phases deliver a Chrome extension that unlocks Pokercraft's full session h
 
 - [x] **Phase 1: Extension Scaffold & Request Interception** - MV3 extension that intercepts API calls with valid DPoP tokens (completed 2026-04-22)
 - [x] **Phase 2: Chunking & Response Merging** - Split large date ranges into 25-day chunks and merge results transparently (completed 2026-04-22)
-- [ ] **Phase 3: Date Picker Unlock** - Remove 3-month restriction from the Pokercraft date picker UI
+- [x] **Phase 3: Date Picker Unlock** - Remove 3-month restriction from the Pokercraft date picker UI (completed 2026-04-22)
 
 ## Phase Details
 
@@ -48,7 +48,7 @@ Plans:
 **Success Criteria** (what must be TRUE):
   1. User can select a start date more than 3 months in the past in the date picker
   2. Date picker patching survives page navigation within Pokercraft (MutationObserver re-applies)
-**Plans:** 1 plan
+**Plans:** 1/1 plans complete
 
 Plans:
 - [ ] 03-01-PLAN.md — MutationObserver date picker unlock + human verification
@@ -61,4 +61,4 @@ Plans:
 |-------|----------------|--------|-----------|
 | 1. Extension Scaffold & Request Interception | 2/2 | Complete   | 2026-04-22 |
 | 2. Chunking & Response Merging | 1/1 | Complete   | 2026-04-22 |
-| 3. Date Picker Unlock | 0/? | Not started | - |
+| 3. Date Picker Unlock | 1/1 | Complete   | 2026-04-22 |
