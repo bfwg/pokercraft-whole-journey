@@ -7,15 +7,15 @@
 
 ### Extension Infrastructure
 
-- [ ] **EXT-01**: Extension loads as Chrome MV3 with valid manifest
-- [ ] **EXT-02**: Content script injects into MAIN world at `document_start` on `my.pokercraft.com`
-- [ ] **EXT-03**: Extension logs interception activity to browser console for debugging
+- [x] **EXT-01**: Extension loads as Chrome MV3 with valid manifest
+- [x] **EXT-02**: Content script injects into MAIN world at `document_start` on `my.pokercraft.com`
+- [x] **EXT-03**: Extension logs interception activity to browser console for debugging
 
 ### Request Interception
 
-- [ ] **INT-01**: Extension monkey-patches fetch/XHR to intercept calls matching `session/list/Holdem`
-- [ ] **INT-02**: Extension detects when `from`/`to` URL params span more than 25 days
-- [ ] **INT-03**: Requests with date ranges <= 25 days pass through unmodified
+- [x] **INT-01**: Extension monkey-patches fetch/XHR to intercept calls matching `session/list/Holdem`
+- [x] **INT-02**: Extension detects when `from`/`to` URL params span more than 25 days
+- [x] **INT-03**: Requests with date ranges <= 25 days pass through unmodified
 
 ### Request Splitting
 
@@ -66,12 +66,12 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| EXT-01 | Phase 1 | Pending |
-| EXT-02 | Phase 1 | Pending |
-| EXT-03 | Phase 1 | Pending |
-| INT-01 | Phase 1 | Pending |
-| INT-02 | Phase 1 | Pending |
-| INT-03 | Phase 1 | Pending |
+| EXT-01 | Phase 1 | Complete |
+| EXT-02 | Phase 1 | Complete |
+| EXT-03 | Phase 1 | Complete |
+| INT-01 | Phase 1 | Complete |
+| INT-02 | Phase 1 | Complete |
+| INT-03 | Phase 1 | Complete |
 | DPOP-01 | Phase 1 | Pending |
 | DPOP-02 | Phase 1 | Pending |
 | SPL-01 | Phase 2 | Pending |
