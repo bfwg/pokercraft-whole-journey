@@ -39,7 +39,3 @@ After making changes, go to `chrome://extensions/` and click the reload button o
 ```bash
 cd extension && zip -r ../pokercraft-whole-journey.zip . -x ".*"
 ```
-
-## Support
-
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-ffdd00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://buymeacoffee.com/bfwg)
