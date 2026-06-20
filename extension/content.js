@@ -135,6 +135,20 @@ async function makeProofRequest() {
 // node-forge uses first 16 bytes of the 32-char IV string; Web Crypto requires exactly 16
 const DECRYPT_IV = 'tE5_yR0~uI2-oP4a';
 
+// The 2026 site update changed the AES-CBC IV, so the first 16-byte block of
+// every response now decrypts to garbage while the rest is intact (the classic
+// CBC IV-mismatch signature). The real payload always begins with this wrapper,
+// so we repair the first block and, from it, recover the IV the app actually
+// uses — then reuse that IV when re-encrypting our merged result for the app.
+const KNOWN_PREFIX = '{"vm":[{"isSessi'; // exactly 16 bytes
+let lastIvCorrect = null; // Uint8Array(16), recovered during decryption
+
+function xorBytes(a, b) {
+  const out = new Uint8Array(a.length);
+  for (let i = 0; i < a.length; i++) out[i] = a[i] ^ b[i];
+  return out;
+}
+
 function hexToBytes(hex) {
   const bytes = new Uint8Array(hex.length / 2);
   for (let i = 0; i < hex.length; i += 2) {
@@ -154,19 +168,41 @@ async function decryptResponse(headerA, hexData) {
   );
 
   const encrypted = hexToBytes(hexData);
-  const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-CBC', iv: ivBytes }, cryptoKey, encrypted
+  const decrypted = new Uint8Array(
+    await crypto.subtle.decrypt({ name: 'AES-CBC', iv: ivBytes }, cryptoKey, encrypted)
   );
 
-  // Remove PKCS7 padding and parse JSON
-  const text = new TextDecoder().decode(decrypted);
-  // Trim any trailing padding/null bytes
-  const trimmed = text.replace(/[\x00-\x1f]+$/, '');
+  // Fast path: if the whole thing parses, the fixed IV was correct after all.
+  const rawText = new TextDecoder().decode(decrypted).replace(/[\x00-\x1f]+$/, '');
   try {
-    return JSON.parse(trimmed);
-  } catch {
-    return trimmed;
+    const obj = JSON.parse(rawText);
+    lastHeaderA = headerA;
+    lastIvCorrect = ivBytes; // fixed IV worked for this header
+    return obj;
+  } catch {}
+
+  // Slow path: the first CBC block is corrupted by the changed IV. Replace the
+  // first 16 bytes with the known wrapper to recover valid JSON, and derive the
+  // IV the app actually uses for this header 'a' so we can re-encrypt correctly.
+  if (decrypted.length >= 16) {
+    const realP0 = new TextEncoder().encode(KNOWN_PREFIX); // 16 bytes
+    const repaired = new Uint8Array(decrypted.length);
+    repaired.set(realP0, 0);
+    repaired.set(decrypted.slice(16), 16);
+    const repairedText = new TextDecoder().decode(repaired).replace(/[\x00-\x1f]+$/, '');
+    try {
+      const obj = JSON.parse(repairedText);
+      // AES_dec(C0) = (our block0 decrypted with fixed IV) XOR fixed IV.
+      // IV_app = AES_dec(C0) XOR realP0.
+      lastIvCorrect = xorBytes(xorBytes(decrypted.slice(0, 16), ivBytes), realP0);
+      lastHeaderA = headerA;
+      return obj;
+    } catch (err) {
+      log('Decrypt repair failed:', err.message);
+    }
   }
+  // Genuinely empty or unrecognised — treat as no sessions.
+  return { vm: [] };
 }
 
 function bytesToHex(bytes) {
@@ -175,7 +211,10 @@ function bytesToHex(bytes) {
 
 async function encryptData(keyStr, plaintext) {
   const keyBytes = new TextEncoder().encode(keyStr);
-  const ivBytes = new TextEncoder().encode(DECRYPT_IV);
+  // Encrypt with the IV recovered during decryption (matches the app's current
+  // scheme) so the app decrypts our merged response correctly; fall back to the
+  // legacy fixed IV only if we never decrypted a real response.
+  const ivBytes = lastIvCorrect || new TextEncoder().encode(DECRYPT_IV);
 
   const cryptoKey = await crypto.subtle.importKey(
     'raw', keyBytes, { name: 'AES-CBC' }, false, ['encrypt']
@@ -206,8 +245,9 @@ function splitDateRange(fromMs, toMs, chunkDays = 85) {
   return chunks;
 }
 
-async function fetchChunks(baseUrl, chunks) {
+async function fetchChunks(baseUrl, chunks, onProgress) {
   const results = [];
+  let sessionsSoFar = 0;
   for (let i = 0; i < chunks.length; i++) {
     const chunk = chunks[i];
     const parsed = new URL(baseUrl, window.location.origin);
@@ -226,31 +266,34 @@ async function fetchChunks(baseUrl, chunks) {
 
       if (response.status !== 200) {
         log(`Chunk ${i + 1}/${chunks.length}: HTTP ${response.status} — skipping`);
-        continue;
-      }
-
-      // Response is encrypted: { data: "<hex>" } with key in header 'a'
-      const headerA = response.headers.get('a');
-      if (headerA) lastHeaderA = headerA;
-      const envelope = await response.json();
-
-      let data;
-      if (headerA && envelope.data && typeof envelope.data === 'string') {
-        // Encrypted response — decrypt it
-        data = await decryptResponse(headerA, envelope.data);
-        log(`Chunk ${i + 1}/${chunks.length}: decrypted OK`);
       } else {
-        // Unencrypted or unexpected format — use as-is
-        data = envelope;
-      }
+        // Response is encrypted: { data: "<hex>" } with key in header 'a'.
+        // decryptResponse pins lastHeaderA + lastIvCorrect together on success.
+        const headerA = response.headers.get('a');
+        const envelope = await response.json();
 
-      const fromDate = new Date(chunk.from).toISOString().slice(0, 10);
-      const toDate = new Date(chunk.to).toISOString().slice(0, 10);
-      log(`Chunk ${i + 1}/${chunks.length}: ${fromDate} → ${toDate} — ${data.vm?.length || data.sessionIds?.length || 0} sessions`);
-      results.push(data);
+        let data;
+        if (headerA && envelope.data && typeof envelope.data === 'string') {
+          // Encrypted response — decrypt it
+          data = await decryptResponse(headerA, envelope.data);
+          log(`Chunk ${i + 1}/${chunks.length}: decrypted OK`);
+        } else {
+          // Unencrypted or unexpected format — use as-is
+          data = envelope;
+        }
+
+        const fromDate = new Date(chunk.from).toISOString().slice(0, 10);
+        const toDate = new Date(chunk.to).toISOString().slice(0, 10);
+        const n = data.vm?.length || data.sessionIds?.length || 0;
+        sessionsSoFar += n;
+        log(`Chunk ${i + 1}/${chunks.length}: ${fromDate} → ${toDate} — ${n} sessions`);
+        results.push(data);
+      }
     } catch (err) {
       log(`Chunk ${i + 1}/${chunks.length}: Error — ${err.message}`);
     }
+
+    if (onProgress) onProgress(i + 1, chunks.length, sessionsSoFar);
 
     if (i < chunks.length - 1) {
       await new Promise((r) => setTimeout(r, 300));
@@ -262,10 +305,13 @@ async function fetchChunks(baseUrl, chunks) {
 function mergeResponses(responses, originalFromMs, originalToMs) {
   if (responses.length === 0) return { vm: [] };
 
-  // Deduplicate sessions by sessionId
+  // Deduplicate sessions by sessionId, keeping a real response as a template so
+  // we hand the app back the same envelope shape (with every session merged in).
   const sessionMap = new Map();
+  let template = null;
   for (const r of responses) {
-    const sessions = r.vm || r.sessionIds || [];
+    if (r && typeof r === 'object' && Array.isArray(r.vm) && !template) template = r;
+    const sessions = (r && (r.vm || r.sessionIds)) || [];
     if (Array.isArray(sessions)) {
       for (const s of sessions) {
         const id = typeof s === 'object' ? s.sessionId : s;
@@ -278,11 +324,13 @@ function mergeResponses(responses, originalFromMs, originalToMs) {
 
   const merged = [...sessionMap.values()];
   log(`Merged: ${merged.length} sessions from ${responses.length} chunks`);
-  return { vm: merged };
+  const out = template ? { ...template } : {};
+  out.vm = merged;
+  return out;
 }
 
 // Expose for manual testing in DevTools console
-window.__pokercraftUnlocker = { makeProofRequest, dpopSigner, log, splitDateRange, mergeResponses, debugFetchChunk, patchDatePicker };
+window.__pokercraftUnlocker = { makeProofRequest, dpopSigner, log, splitDateRange, mergeResponses, debugFetchChunk, fetchWholeJourney, setWholeJourneyActive, isWholeJourneyActive };
 
 async function debugFetchChunk() {
   if (!capturedAuth?.authorization) { log('No auth yet'); return; }
@@ -312,8 +360,12 @@ async function debugFetchChunk() {
 
 const DEBUG = false; // Set to true to enable console logging
 
+// Temporarily forced on while the "Load all records" button runs, so the user
+// gets chunk-by-chunk diagnostics in the console without editing this file.
+let FORCE_LOG = false;
+
 function log(...args) {
-  if (DEBUG) console.log('[PokerCraft Whole Journey]', ...args);
+  if (DEBUG || FORCE_LOG) console.log('[PokerCraft Whole Journey]', ...args);
 }
 
 function isTargetRequest(url) {
@@ -342,21 +394,145 @@ function isLargeRange(days) {
   return days > 85;
 }
 
+// --- Whole Journey state ---
+//
+// The "Load all records" button (see injectLoadButton) fetches everything
+// from WHOLE_JOURNEY_START → now in 85-day chunks and stitches it
+// together. The merged result is cached and served to the app by the fetch/XHR
+// interceptors, so PokerCraft renders the full history on its next session-list
+// request. Purely network-layer: no DOM / Angular coupling, so it survives
+// PokerCraft UI and Angular Material upgrades (which is exactly what repeatedly
+// broke the old DOM-based date-picker unlock).
+//
+// Change WHOLE_JOURNEY_START to load from a different date.
+const WHOLE_JOURNEY_START = '2025-03-01T00:00:00';
+const WHOLE_JOURNEY_START_MS = new Date(WHOLE_JOURNEY_START).getTime();
+const WJ_FLAG_KEY = 'pcWholeJourney';
+
+// In-memory merged whole-journey result. While the mode is active, the
+// interceptor lazily fetches this on the app's first session-list request and
+// serves it to every subsequent one — so the full history appears with no
+// calendar interaction. The app only renders data from its own requests, so the
+// button just sets the flag and reloads to trigger one fresh request.
+let wholeJourneyCache = null;
+let wholeJourneyPromise = null; // de-dupes concurrent first-request fetches
+
+// Exact session-list URL the app last used (preserves currency / game-type /
+// other params). Reused as the base for our chunk requests.
+let lastTargetUrl = null;
+
+function isWholeJourneyActive() {
+  try {
+    return sessionStorage.getItem(WJ_FLAG_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function setWholeJourneyActive(on) {
+  try {
+    if (on) sessionStorage.setItem(WJ_FLAG_KEY, '1');
+    else sessionStorage.removeItem(WJ_FLAG_KEY);
+  } catch {}
+}
+
+// Update the floating button's status line, if it's mounted.
+function setWjStatus(text, bg) {
+  const el = document.getElementById('pc-wj-status');
+  if (!el) return;
+  el.style.display = 'block';
+  el.textContent = text;
+  if (bg) el.style.background = bg;
+}
+
+// Fetch + stitch the whole journey, caching the result. De-duped so several
+// simultaneous session-list requests share a single fetch.
+function ensureWholeJourney() {
+  if (wholeJourneyCache) return Promise.resolve(wholeJourneyCache);
+  if (!wholeJourneyPromise) {
+    wholeJourneyPromise = fetchWholeJourney().catch((err) => {
+      wholeJourneyPromise = null; // allow retry on the next request
+      throw err;
+    });
+  }
+  return wholeJourneyPromise;
+}
+
+async function fetchWholeJourney() {
+  FORCE_LOG = true;
+  const baseUrl =
+    lastTargetUrl ||
+    'https://my.pokercraft.com/api/session/list/Holdem?from=0&to=0&currency=USD';
+  const chunks = splitDateRange(WHOLE_JOURNEY_START_MS, Date.now());
+  setWjStatus(`⏳ 正在加载全部历史… 0/${chunks.length} 块`, '#f9a825');
+  console.log(
+    `[PokerCraft Whole Journey] loading ${chunks.length} chunks since ${WHOLE_JOURNEY_START.slice(0, 10)}…`
+  );
+  const responses = await fetchChunks(baseUrl, chunks, (done, total, sessions) => {
+    setWjStatus(`⏳ 加载中… ${done}/${total} 块 · 已拉取 ${sessions} 条`, '#f9a825');
+  });
+  const merged = mergeResponses(responses, WHOLE_JOURNEY_START_MS, Date.now());
+  wholeJourneyCache = merged;
+  const count = merged.vm ? merged.vm.length : 0;
+  window.__pokercraftWholeJourney = { merged, responses };
+  console.log(
+    `[PokerCraft Whole Journey] cached ${count} sessions from ${responses.length}/${chunks.length} chunks`
+  );
+  setWjStatus(
+    count > 0 ? `✓ 已加载 ${count} 条历史记录` : '✗ 加载到 0 条 — 见 Console',
+    count > 0 ? '#2e7d32' : '#c62828'
+  );
+  FORCE_LOG = false;
+  return merged;
+}
+
+// Fabricate a successful XHR response carrying responseBody, firing the events
+// Angular/Zone.js listens for (both property handlers and dispatched events).
+function serveXhrResponse(xhr, responseBody, onreadystatechangeHandler, onloadHandler, onloadendHandler) {
+  Object.defineProperty(xhr, 'readyState', { get: () => 4, configurable: true });
+  Object.defineProperty(xhr, 'status', { get: () => 200, configurable: true });
+  Object.defineProperty(xhr, 'statusText', { get: () => 'OK', configurable: true });
+  Object.defineProperty(xhr, 'responseText', { get: () => responseBody, configurable: true });
+  Object.defineProperty(xhr, 'response', { get: () => responseBody, configurable: true });
+  Object.defineProperty(xhr, 'responseURL', { get: () => xhr._pcUrl, configurable: true });
+
+  xhr.getResponseHeader = function (name) {
+    if (name.toLowerCase() === 'a' && lastHeaderA) return lastHeaderA;
+    if (name.toLowerCase() === 'content-type') return 'application/json';
+    return null;
+  };
+  xhr.getAllResponseHeaders = function () {
+    return `content-type: application/json\r\na: ${lastHeaderA || ''}\r\n`;
+  };
+
+  if (typeof onreadystatechangeHandler === 'function') onreadystatechangeHandler.call(xhr);
+  xhr.dispatchEvent(new Event('readystatechange'));
+  if (typeof onloadHandler === 'function') onloadHandler.call(xhr, new ProgressEvent('load'));
+  xhr.dispatchEvent(new ProgressEvent('load'));
+  if (typeof onloadendHandler === 'function') onloadendHandler.call(xhr, new ProgressEvent('loadend'));
+  xhr.dispatchEvent(new ProgressEvent('loadend'));
+}
+
+// Build a 200 OK body for a merged result, re-encrypting if we have a key so
+// the app's own decryption layer processes it transparently.
+async function buildMergedBody(merged) {
+  if (lastHeaderA) {
+    const aesKey = lastHeaderA.substring(8, lastHeaderA.length - 8);
+    const encryptedHex = await encryptData(aesKey, JSON.stringify(merged));
+    return { body: JSON.stringify({ data: encryptedHex }), encrypted: true };
+  }
+  log('Warning: no encryption key available, returning plaintext');
+  return { body: JSON.stringify(merged), encrypted: false };
+}
+
 // --- Fetch interception ---
 
 window.fetch = async function (input, init) {
   const url = input instanceof Request ? input.url : String(input);
 
   if (isTargetRequest(url)) {
-    const range = parseDateRange(url);
     log('Intercepted fetch:', url);
-    log(
-      'Date range:',
-      range.from.toISOString(),
-      '→',
-      range.to.toISOString(),
-      `(${range.days} days)`
-    );
+    lastTargetUrl = url;
 
     // Capture auth headers from fetch requests (if app uses fetch path)
     if (!capturedAuth && init?.headers) {
@@ -373,30 +549,20 @@ window.fetch = async function (input, init) {
       }
     }
 
-    if (isLargeRange(range.days) && capturedAuth) {
-      const parsed = new URL(url, window.location.origin);
-      const fromMs = Number(parsed.searchParams.get('from'));
-      const toMs = Number(parsed.searchParams.get('to'));
-      const chunks = splitDateRange(fromMs, toMs);
-      log(`Splitting ${range.days}-day range into ${chunks.length} chunks`);
-      const responses = await fetchChunks(url, chunks);
-      const merged = mergeResponses(responses, fromMs, toMs);
-
-      // Re-encrypt so the app's decryption layer handles it
-      if (lastHeaderA) {
-        const aesKey = lastHeaderA.substring(8, lastHeaderA.length - 8);
-        const encryptedHex = await encryptData(aesKey, JSON.stringify(merged));
-        return new Response(JSON.stringify({ data: encryptedHex }), {
+    // Whole Journey mode: lazily fetch the full history, then serve it.
+    if (isWholeJourneyActive() && capturedAuth) {
+      try {
+        const merged = await ensureWholeJourney();
+        const { body, encrypted } = await buildMergedBody(merged);
+        return new Response(body, {
           status: 200,
-          headers: { 'content-type': 'application/json', 'a': lastHeaderA },
+          headers: encrypted
+            ? { 'content-type': 'application/json', 'a': lastHeaderA }
+            : { 'content-type': 'application/json' },
         });
+      } catch (err) {
+        log('Whole Journey fetch failed (fetch path), passing through:', err.message);
       }
-      return new Response(JSON.stringify(merged), {
-        status: 200,
-        headers: { 'content-type': 'application/json' },
-      });
-    } else if (isLargeRange(range.days)) {
-      log('Large range detected but no auth captured yet — passing through');
     }
   }
   return originalFetch(input, init);
@@ -420,15 +586,8 @@ XMLHttpRequest.prototype.open = function (method, url, ...rest) {
 
 XMLHttpRequest.prototype.send = function (body) {
   if (this._pcUrl && isTargetRequest(this._pcUrl)) {
-    const range = parseDateRange(this._pcUrl);
     log('Intercepted XHR:', this._pcMethod, this._pcUrl);
-    log(
-      'Date range:',
-      range.from.toISOString(),
-      '→',
-      range.to.toISOString(),
-      `(${range.days} days)`
-    );
+    lastTargetUrl = this._pcUrl;
 
     // Capture auth headers from XHR (primary path since app uses XHR)
     if (!capturedAuth && this._pcHeaders) {
@@ -441,458 +600,107 @@ XMLHttpRequest.prototype.send = function (body) {
       }
     }
 
-    if (isLargeRange(range.days) && capturedAuth) {
-      const parsed = new URL(this._pcUrl, window.location.origin);
-      const fromMs = Number(parsed.searchParams.get('from'));
-      const toMs = Number(parsed.searchParams.get('to'));
-      const chunks = splitDateRange(fromMs, toMs);
-      log(`Splitting ${range.days}-day range into ${chunks.length} chunks`);
-
+    // Whole Journey mode: lazily fetch the full history, then serve it.
+    if (isWholeJourneyActive() && capturedAuth) {
       const xhr = this;
-      // Save all event listeners/handlers the app may have set
       const onloadHandler = xhr.onload;
       const onreadystatechangeHandler = xhr.onreadystatechange;
       const onloadendHandler = xhr.onloadend;
 
       (async () => {
         try {
-          const responses = await fetchChunks(xhr._pcUrl, chunks);
-          const merged = mergeResponses(responses, fromMs, toMs);
-
-          // Re-encrypt merged data so the app's decryption layer handles it normally
-          let responseBody;
-          if (lastHeaderA) {
-            const aesKey = lastHeaderA.substring(8, lastHeaderA.length - 8);
-            const encryptedHex = await encryptData(aesKey, JSON.stringify(merged));
-            responseBody = JSON.stringify({ data: encryptedHex });
-          } else {
-            responseBody = JSON.stringify(merged);
-            log('Warning: no encryption key available, returning plaintext');
-          }
-
-          // Override all response-related properties
-          Object.defineProperty(xhr, 'readyState', { get: () => 4, configurable: true });
-          Object.defineProperty(xhr, 'status', { get: () => 200, configurable: true });
-          Object.defineProperty(xhr, 'statusText', { get: () => 'OK', configurable: true });
-          Object.defineProperty(xhr, 'responseText', { get: () => responseBody, configurable: true });
-          Object.defineProperty(xhr, 'response', { get: () => responseBody, configurable: true });
-          Object.defineProperty(xhr, 'responseURL', { get: () => xhr._pcUrl, configurable: true });
-
-          // Fake the response headers so the app can read header 'a' for decryption
-          xhr.getResponseHeader = function(name) {
-            if (name.toLowerCase() === 'a' && lastHeaderA) return lastHeaderA;
-            if (name.toLowerCase() === 'content-type') return 'application/json';
-            return null;
-          };
-          xhr.getAllResponseHeaders = function() {
-            return `content-type: application/json\r\na: ${lastHeaderA || ''}\r\n`;
-          };
-
-          // Trigger callbacks — Angular/Zone.js uses both property handlers and events
-          if (typeof onreadystatechangeHandler === 'function') {
-            onreadystatechangeHandler.call(xhr);
-          }
-          xhr.dispatchEvent(new Event('readystatechange'));
-
-          if (typeof onloadHandler === 'function') {
-            onloadHandler.call(xhr, new ProgressEvent('load'));
-          }
-          xhr.dispatchEvent(new ProgressEvent('load'));
-
-          if (typeof onloadendHandler === 'function') {
-            onloadendHandler.call(xhr, new ProgressEvent('loadend'));
-          }
-          xhr.dispatchEvent(new ProgressEvent('loadend'));
+          const merged = await ensureWholeJourney();
+          const { body: responseBody } = await buildMergedBody(merged);
+          serveXhrResponse(xhr, responseBody, onreadystatechangeHandler, onloadHandler, onloadendHandler);
         } catch (err) {
-          log('Chunking failed, falling back to original request:', err.message);
+          log('Whole Journey fetch failed (XHR path), falling back:', err.message);
           originalXHRSend.call(xhr, body);
         }
       })();
       return; // Don't call originalXHRSend
-    } else if (isLargeRange(range.days)) {
-      log('Large range detected but no auth captured yet — passing through');
     }
   }
   return originalXHRSend.call(this, body);
 };
 
-// --- Date Picker Unlock ---
+// --- Load button (UI) ---
+//
+// A self-contained floating button appended to <body>, deliberately outside
+// Angular's component tree so SPA navigation never touches it and no UI/Material
+// version assumptions are baked in. Clicking toggles Whole Journey mode and
+// reloads; after the reload the interceptor serves the app's own first
+// session-list request from the full history — no calendar interaction needed.
+function injectLoadButton() {
+  if (!document.body || document.getElementById('pc-wj-box')) return;
 
-/**
- * DOM structure (from diagnostics):
- *   div.cdk-overlay-pane.mat-datepicker-popup
- *     mat-datepicker-content
- *       mat-calendar
- *         mat-calendar-header
- *           button.mat-calendar-previous-button (prev month)
- *           button.mat-calendar-next-button (next month, disabled="true" + mat-button-disabled)
- *         mat-month-view
- *           table > tbody > tr > td.mat-calendar-body-cell-container
- *             > button.mat-calendar-body-cell (aria-label="2026-04-23T00:00:00-07:00")
- *               Disabled cells: + class mat-calendar-body-disabled + aria-disabled="true"
- *               (NO html disabled attr on cells — only on nav buttons)
- *
- * Angular component hierarchy (from __ngContext__):
- *   MatDatepickerContent { _calendar, datepicker }
- *     _calendar (MatCalendar) { monthView, _minDate, _maxDate, dateFilter, _currentView }
- *       monthView (MatMonthView) { _weeks, _matCalendarBody, _dateAdapter, activeDate,
- *                                   selectedChange, _userSelection, _minDate, _maxDate, dateFilter }
- */
+  const active = isWholeJourneyActive();
 
-function getComponentsFromContext(el) {
-  const ctx = el.__ngContext__;
-  if (!ctx || !Array.isArray(ctx)) return [];
-  const results = [];
-  for (const item of ctx) {
-    if (item && typeof item === 'object' && !Array.isArray(item)) {
-      results.push(item);
-    }
-  }
-  return results;
-}
-
-/**
- * Find the MatMonthView component instance from the calendar popup.
- */
-function findMonthView(popup) {
-  const allEls = [popup, ...popup.querySelectorAll('*')];
-  for (const el of allEls) {
-    for (const comp of getComponentsFromContext(el)) {
-      if ('_weeks' in comp && 'selectedChange' in comp && '_dateAdapter' in comp) {
-        return comp;
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * Find the MatCalendar component instance from the calendar popup.
- */
-function findCalendar(popup) {
-  const allEls = [popup, ...popup.querySelectorAll('*')];
-  for (const el of allEls) {
-    for (const comp of getComponentsFromContext(el)) {
-      if ('monthView' in comp && '_currentView' in comp && '_minDate' in comp) {
-        return comp;
-      }
-    }
-  }
-  return null;
-}
-
-/**
- * Unlock the calendar:
- * 1. Remove disabled state from nav buttons (prev/next month) — these have real HTML disabled
- * 2. Remove disabled styling from date cells — these use aria-disabled + CSS class
- * 3. Install click interceptor that reads aria-label date and forces selection via Angular
- */
-function unlockCalendar(popup) {
-  const today = new Date();
-  const todayMidnight = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-
-  // --- Nav buttons ---
-  const nextBtn = popup.querySelector('button.mat-calendar-next-button');
-  const prevBtn = popup.querySelector('button.mat-calendar-previous-button');
-
-  // Previous button: always unlock
-  if (prevBtn && (prevBtn.disabled || prevBtn.classList.contains('mat-button-disabled'))) {
-    prevBtn.disabled = false;
-    prevBtn.classList.remove('mat-button-disabled');
-    prevBtn.removeAttribute('aria-disabled');
-    log(`Unlocked nav button: ${prevBtn.getAttribute('aria-label')}`);
-  }
-
-  // Next button: unlock unless navigating would go to a future month
-  if (nextBtn) {
-    const cal = findCalendar(popup);
-    let shouldDisableNext = false;
-    if (cal) {
-      const adapter = cal.monthView?._dateAdapter || cal._dateAdapter;
-      const active = cal._clampedActiveDate || cal.activeDate;
-      if (adapter && active) {
-        const displayedYear = adapter.getYear(active);
-        const displayedMonth = adapter.getMonth(active);
-        // If next month would be after current month, disable
-        if (displayedYear > today.getFullYear() ||
-            (displayedYear === today.getFullYear() && displayedMonth >= today.getMonth())) {
-          shouldDisableNext = true;
-        }
-      }
-    }
-
-    if (shouldDisableNext) {
-      nextBtn.disabled = true;
-      nextBtn.classList.add('mat-button-disabled');
-    } else if (nextBtn.disabled || nextBtn.classList.contains('mat-button-disabled')) {
-      nextBtn.disabled = false;
-      nextBtn.classList.remove('mat-button-disabled');
-      nextBtn.removeAttribute('aria-disabled');
-      log(`Unlocked nav button: ${nextBtn.getAttribute('aria-label')}`);
-    }
-  }
-
-  // --- Date cells ---
-  const disabledCells = popup.querySelectorAll('button.mat-calendar-body-cell.mat-calendar-body-disabled');
-  let unlockCount = 0;
-  for (const cell of disabledCells) {
-    const ariaLabel = cell.getAttribute('aria-label');
-    if (!ariaLabel) continue;
-    const cellDate = new Date(ariaLabel);
-    if (isNaN(cellDate.getTime())) continue;
-
-    // Only unlock past/today dates
-    if (cellDate <= todayMidnight) {
-      cell.classList.remove('mat-calendar-body-disabled');
-      cell.removeAttribute('aria-disabled');
-      cell._wasDisabled = true;
-      unlockCount++;
-    }
-  }
-  if (unlockCount > 0) {
-    log(`Unlocked ${unlockCount} past date cells`);
-  }
-
-  // Disable any future date cells that Angular left enabled
-  // (can happen after we clear _maxDate during navigation)
-  const enabledCells = popup.querySelectorAll('button.mat-calendar-body-cell:not(.mat-calendar-body-disabled)');
-  let disableCount = 0;
-  for (const cell of enabledCells) {
-    const ariaLabel = cell.getAttribute('aria-label');
-    if (!ariaLabel) continue;
-    const cellDate = new Date(ariaLabel);
-    if (isNaN(cellDate.getTime())) continue;
-
-    if (cellDate > todayMidnight) {
-      cell.classList.add('mat-calendar-body-disabled');
-      cell.setAttribute('aria-disabled', 'true');
-      disableCount++;
-    }
-  }
-  if (disableCount > 0) {
-    log(`Disabled ${disableCount} future date cells`);
-  }
-
-  // --- Click interceptor ---
-  installClickInterceptor(popup);
-}
-
-function installClickInterceptor(popup) {
-  if (popup._dateClickInterceptor) return;
-  popup._dateClickInterceptor = true;
-
-  popup.addEventListener('click', (e) => {
-    // --- Handle nav button clicks ---
-    const navBtn = e.target.closest('button.mat-calendar-previous-button, button.mat-calendar-next-button');
-    if (navBtn) {
-      const isPrev = navBtn.classList.contains('mat-calendar-previous-button');
-
-      // Block forward navigation into future months
-      if (!isPrev) {
-        const cal = findCalendar(popup);
-        if (cal) {
-          const adapter = cal.monthView?._dateAdapter || cal._dateAdapter;
-          const currentActive = cal._clampedActiveDate || cal.activeDate;
-          if (adapter && currentActive) {
-            const newActive = adapter.addCalendarMonths(currentActive, 1);
-            const newYear = adapter.getYear(newActive);
-            const newMonth = adapter.getMonth(newActive);
-            const now = new Date();
-            if (newYear > now.getFullYear() ||
-                (newYear === now.getFullYear() && newMonth > now.getMonth())) {
-              log('Nav interceptor: blocked — cannot navigate to future month');
-              e.stopImmediatePropagation();
-              e.preventDefault();
-              return;
-            }
-          }
-        }
-      }
-
-      // Clear min/max restrictions so Angular's own handler can navigate freely.
-      // We're in capture phase (before Angular's handler), so this takes effect
-      // before Angular checks the restrictions. Angular handles the navigation
-      // inside Zone.js, so change detection works normally.
-      const cal = findCalendar(popup);
-      if (cal) {
-        cal._minDate = null;
-        cal._maxDate = null;
-        if (cal.monthView) {
-          cal.monthView._minDate = null;
-          cal.monthView._maxDate = null;
-        }
-      }
-
-      // If the button is disabled (HTML attr), Angular's handler won't fire.
-      // Remove disabled so the click reaches Angular's handler.
-      if (navBtn.disabled) {
-        navBtn.disabled = false;
-        navBtn.classList.remove('mat-button-disabled');
-      }
-
-      // DON'T stopPropagation — let Angular handle the navigation inside Zone.js
-      log(`Nav interceptor: cleared restrictions, letting Angular navigate ${isPrev ? 'previous' : 'next'} month`);
-
-      // Re-unlock after Angular re-renders the new month
-      setTimeout(() => unlockCalendar(popup), 200);
-      return;
-    }
-
-    // --- Handle date cell clicks on cells we unlocked ---
-    const cellBtn = e.target.closest('button.mat-calendar-body-cell');
-    if (!cellBtn || !cellBtn._wasDisabled) return;
-
-    const ariaLabel = cellBtn.getAttribute('aria-label');
-    if (!ariaLabel) return;
-
-    const mv = findMonthView(popup);
-    if (!mv) {
-      log('Click interceptor: could not find MonthView component');
-      return;
-    }
-
-    const parsed = new Date(ariaLabel);
-    if (isNaN(parsed.getTime())) return;
-
-    // Find the cell data object in _weeks and enable it BEFORE Angular's handler runs.
-    // This way Angular's native click handler will process it normally — no delay.
-    const dayOfMonth = parsed.getDate();
-    let enabled = false;
-    if (mv._weeks) {
-      for (const row of mv._weeks) {
-        if (!Array.isArray(row)) continue;
-        for (const cell of row) {
-          if (cell && cell.value === dayOfMonth && !cell.enabled) {
-            cell.enabled = true;
-            enabled = true;
-          }
-        }
-      }
-    }
-    // Also enable in _matCalendarBody.rows if present
-    if (mv._matCalendarBody?.rows) {
-      for (const row of mv._matCalendarBody.rows) {
-        if (!Array.isArray(row)) continue;
-        for (const cell of row) {
-          if (cell && cell.value === dayOfMonth && !cell.enabled) {
-            cell.enabled = true;
-          }
-        }
-      }
-    }
-
-    if (enabled) {
-      log(`Click interceptor: enabled cell for day ${dayOfMonth}, letting Angular handle click`);
-      // Don't stop propagation — let Angular's handler process the click natively
-      return;
-    }
-
-    // Fallback: if we couldn't find the cell data, use the selection model directly
-    log(`Click interceptor: fallback — forcing selection for ${parsed.toISOString().slice(0, 10)}`);
-
-    const date = mv._dateAdapter.createDate(
-      parsed.getFullYear(), parsed.getMonth(), parsed.getDate()
-    );
-
-    const allEls = [popup, ...popup.querySelectorAll('*')];
-    for (const el of allEls) {
-      for (const comp of getComponentsFromContext(el)) {
-        if ('_model' in comp && '_calendar' in comp && '_rangeSelectionStrategy' in comp) {
-          const model = comp._model;
-          const strategy = comp._rangeSelectionStrategy;
-
-          if (strategy && typeof strategy.selectionFinished === 'function') {
-            const newSelection = strategy.selectionFinished(date, model.selection, e);
-            if (newSelection) {
-              model.updateSelection(newSelection, comp);
-              return;
-            }
-          }
-
-          if (typeof model.add === 'function') {
-            model.add(date);
-            return;
-          }
-          break;
-        }
-      }
-    }
-
-    mv.selectedChange.emit(date);
-  }, true); // capture phase
-
-  log('Click interceptor installed');
-}
-
-function patchDatePicker() {
-  let calendarObserver = null;
-  let debounceTimer = null;
-
-  const bodyObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      for (const node of mutation.addedNodes) {
-        if (!(node instanceof HTMLElement)) continue;
-
-        // The popup is: div.cdk-overlay-pane.mat-datepicker-popup
-        const popup =
-          node.matches?.('.mat-datepicker-popup')
-            ? node
-            : node.querySelector?.('.mat-datepicker-popup') ||
-              node.querySelector?.('mat-datepicker-content');
-
-        if (popup) {
-          log('Calendar popup detected');
-
-          // Wait for Angular to finish rendering
-          setTimeout(() => unlockCalendar(popup), 150);
-
-          // Watch for month navigation re-renders (childList only)
-          if (calendarObserver) calendarObserver.disconnect();
-          calendarObserver = new MutationObserver(() => {
-            if (debounceTimer) clearTimeout(debounceTimer);
-            debounceTimer = setTimeout(() => {
-              // Disconnect during patching to avoid loops
-              if (calendarObserver) {
-                calendarObserver.disconnect();
-              }
-              unlockCalendar(popup);
-              if (calendarObserver) {
-                calendarObserver.observe(popup, { childList: true, subtree: true });
-              }
-            }, 150);
-          });
-          calendarObserver.observe(popup, { childList: true, subtree: true });
-        }
-      }
-
-      for (const node of mutation.removedNodes) {
-        if (!(node instanceof HTMLElement)) continue;
-        if (node.matches?.('.mat-datepicker-popup') || node.querySelector?.('.mat-datepicker-popup')) {
-          if (calendarObserver) {
-            calendarObserver.disconnect();
-            calendarObserver = null;
-            log('Calendar removed — observer disconnected');
-          }
-        }
-      }
-    }
+  const box = document.createElement('div');
+  box.id = 'pc-wj-box';
+  Object.assign(box.style, {
+    position: 'fixed',
+    zIndex: '2147483647',
+    bottom: '16px',
+    right: '16px',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-end',
+    gap: '6px',
+    maxWidth: '320px',
   });
 
-  bodyObserver.observe(document.body, { childList: true, subtree: true });
-  log('Date picker unlock observer active');
+  const btn = document.createElement('button');
+  btn.textContent = active ? '✓ 全部历史已加载 · 点此恢复默认' : '📥 加载全部历史记录';
+  btn.title = active
+    ? '当前正显示 2025-03-01 至今的全部记录。点击恢复 PokerCraft 默认范围。'
+    : `点击加载 ${WHOLE_JOURNEY_START.slice(0, 10)} 至今的全部 session,无需手动选日期(会刷新一次页面)。`;
+  Object.assign(btn.style, {
+    padding: '10px 14px',
+    background: active ? '#2e7d32' : '#1565c0',
+    color: '#fff',
+    border: 'none',
+    borderRadius: '8px',
+    font: '600 13px/1.2 system-ui, -apple-system, sans-serif',
+    cursor: 'pointer',
+    boxShadow: '0 2px 8px rgba(0,0,0,.3)',
+  });
+
+  const status = document.createElement('div');
+  status.id = 'pc-wj-status';
+  Object.assign(status.style, {
+    display: 'none',
+    font: '500 12px/1.4 system-ui, -apple-system, sans-serif',
+    color: '#fff',
+    background: '#37474f',
+    padding: '6px 10px',
+    borderRadius: '6px',
+  });
+
+  btn.addEventListener('click', () => {
+    setWholeJourneyActive(!active);
+    btn.disabled = true;
+    btn.style.opacity = '0.6';
+    btn.textContent = active ? '恢复中…' : '加载中…';
+    location.reload();
+  });
+
+  box.appendChild(btn);
+  box.appendChild(status);
+  document.body.appendChild(box);
+  log('Load button injected (active=' + active + ')');
 }
 
 // --- Init ---
 
 if (document.body) {
-  patchDatePicker();
+  injectLoadButton();
 } else {
   const waitForBody = new MutationObserver(() => {
     if (document.body) {
       waitForBody.disconnect();
-      patchDatePicker();
+      injectLoadButton();
     }
   });
   waitForBody.observe(document.documentElement, { childList: true });
 }
-log('Content script loaded — fetch/XHR interception active, DPoP capture enabled, date picker unlock active');
+log('Content script loaded — fetch/XHR interception active, DPoP capture enabled, Load button active');
