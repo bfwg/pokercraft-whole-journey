@@ -577,7 +577,7 @@ window.fetch = async function (input, init) {
     // Whole Journey mode: lazily fetch the full history, then serve it.
     if (isWholeJourneyActive() && capturedAuth) {
       try {
-        const merged = await ensureWholeJourney();
+        const merged = await ensureWholeJourney(url);
         const { body, encrypted } = await buildMergedBody(merged);
         return new Response(body, {
           status: 200,
@@ -634,7 +634,7 @@ XMLHttpRequest.prototype.send = function (body) {
 
       (async () => {
         try {
-          const merged = await ensureWholeJourney();
+          const merged = await ensureWholeJourney(xhr._pcUrl);
           const { body: responseBody } = await buildMergedBody(merged);
           serveXhrResponse(xhr, responseBody, onreadystatechangeHandler, onloadHandler, onloadendHandler);
         } catch (err) {
