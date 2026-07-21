@@ -394,6 +394,24 @@ function isLargeRange(days) {
   return days > 85;
 }
 
+// Derive a stable per-filter cache key from a session-list URL: strips the
+// from/to range (which varies per chunk/request) and sorts the remaining
+// params (currency, game type, stakes, etc.) so any filter the app adds is
+// captured automatically, with no param names hardcoded.
+function filterSignature(url) {
+  try {
+    const parsed = new URL(url, window.location.origin);
+    parsed.searchParams.delete('from');
+    parsed.searchParams.delete('to');
+    const sortedParams = [...parsed.searchParams.entries()]
+      .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+      .map(([k, v]) => `${k}=${v}`);
+    return parsed.pathname + '?' + sortedParams.join('&');
+  } catch {
+    return url;
+  }
+}
+
 // --- Whole Journey state ---
 //
 // The "Load all records" button (see injectLoadButton) fetches everything
@@ -409,13 +427,15 @@ const WHOLE_JOURNEY_START = '2025-03-01T00:00:00';
 const WHOLE_JOURNEY_START_MS = new Date(WHOLE_JOURNEY_START).getTime();
 const WJ_FLAG_KEY = 'pcWholeJourney';
 
-// In-memory merged whole-journey result. While the mode is active, the
-// interceptor lazily fetches this on the app's first session-list request and
-// serves it to every subsequent one — so the full history appears with no
-// calendar interaction. The app only renders data from its own requests, so the
-// button just sets the flag and reloads to trigger one fresh request.
-let wholeJourneyCache = null;
-let wholeJourneyPromise = null; // de-dupes concurrent first-request fetches
+// In-memory merged whole-journey results, keyed per filter signature (see
+// filterSignature). While the mode is active, the interceptor lazily fetches
+// the entry for the intercepted request's own filter on first sight and
+// serves it to every subsequent request with that same signature — so the
+// full history appears with no calendar interaction, and switching the
+// stakes/currency/game-type filter triggers its own independent fetch instead
+// of reusing another filter's cached result.
+let wholeJourneyCache = new Map(); // signature -> merged result
+let wholeJourneyPromise = new Map(); // signature -> in-flight de-dupe promise
 
 // Exact session-list URL the app last used (preserves currency / game-type /
 // other params). Reused as the base for our chunk requests.
@@ -445,23 +465,28 @@ function setWjStatus(text, bg) {
   if (bg) el.style.background = bg;
 }
 
-// Fetch + stitch the whole journey, caching the result. De-duped so several
-// simultaneous session-list requests share a single fetch.
-function ensureWholeJourney() {
-  if (wholeJourneyCache) return Promise.resolve(wholeJourneyCache);
-  if (!wholeJourneyPromise) {
-    wholeJourneyPromise = fetchWholeJourney().catch((err) => {
-      wholeJourneyPromise = null; // allow retry on the next request
+// Fetch + stitch the whole journey for the given request URL's filter, caching
+// the result per filter signature. De-duped per signature so several
+// simultaneous session-list requests with the same filter share a single fetch.
+function ensureWholeJourney(url) {
+  const sig = filterSignature(url);
+  if (wholeJourneyCache.has(sig)) {
+    return Promise.resolve(wholeJourneyCache.get(sig));
+  }
+  if (!wholeJourneyPromise.has(sig)) {
+    const promise = fetchWholeJourney(url, sig).catch((err) => {
+      wholeJourneyPromise.delete(sig); // allow retry on the next request
       throw err;
     });
+    wholeJourneyPromise.set(sig, promise);
   }
-  return wholeJourneyPromise;
+  return wholeJourneyPromise.get(sig);
 }
 
-async function fetchWholeJourney() {
+async function fetchWholeJourney(baseUrl, sig) {
   FORCE_LOG = true;
-  const baseUrl =
-    lastTargetUrl ||
+  baseUrl =
+    baseUrl ||
     'https://my.pokercraft.com/api/session/list/Holdem?from=0&to=0&currency=USD';
   const chunks = splitDateRange(WHOLE_JOURNEY_START_MS, Date.now());
   setWjStatus(`⏳ 正在加载全部历史… 0/${chunks.length} 块`, '#f9a825');
@@ -472,9 +497,9 @@ async function fetchWholeJourney() {
     setWjStatus(`⏳ 加载中… ${done}/${total} 块 · 已拉取 ${sessions} 条`, '#f9a825');
   });
   const merged = mergeResponses(responses, WHOLE_JOURNEY_START_MS, Date.now());
-  wholeJourneyCache = merged;
+  wholeJourneyCache.set(sig, merged);
   const count = merged.vm ? merged.vm.length : 0;
-  window.__pokercraftWholeJourney = { merged, responses };
+  window.__pokercraftWholeJourney = { merged, responses, signature: sig };
   console.log(
     `[PokerCraft Whole Journey] cached ${count} sessions from ${responses.length}/${chunks.length} chunks`
   );
